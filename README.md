@@ -1,111 +1,110 @@
-# AuRAG: Auditable Retrieval-Augmented Generation
+# Auditable RAG for Legal Documents
 
-**Enhancing Trustworthiness via Structure-Preserving Hierarchical Retrieval (SPHR) and Retrieval-Dependent Grammars (RDG)**
+Retrieval-augmented generation for statutory law and contracts, built so that every cited source can be checked.
 
-This repository implements **AuRAG**, a specialized RAG framework designed for **high-stakes legal domains** (specifically statutory law). It mathematically eliminates citation fabrication (syntactic hallucination) and significantly enhances retrieval specificity through structure-aware document processing.
+This repository implements a two-layer RAG pipeline for high-stakes legal question answering. The first layer retrieves whole legal provisions (articles, sections) with stable source IDs. The second layer constrains decoding so the model can only cite identifiers that were actually retrieved.
 
-![Comparison](https://img.shields.io/badge/Status-Research%20Preview-blue) ![License](https://img.shields.io/badge/License-MIT-green)
+![Status](https://img.shields.io/badge/Status-Research%20Preview-blue) ![License](https://img.shields.io/badge/License-MIT-green)
 
----
+## Motivation
 
-## 🎯 **Vision & Novelty**
+RAG systems used on legal text can fail in four ways when they cite sources:
 
-### **The Problem: Citation Hallucinations**
-Current RAG systems struggle with 4 types of citation errors:
-1.  **Type 1 (Fabrication):** Citing a source that was never retrieved (pure hallucination).
-2.  **Type 2 (Misattribution):** Citing a valid retrieved source that is irrelevant to the claim.
-3.  **Type 3 (Reasoning Error):** Citing a relevant source but deriving flawed logic.
-4.  **Type 4 (Retrieval Failure):** Missing the necessary evidence entirely.
+1. **Type 1 (Fabrication):** citing a source that was never retrieved.
+2. **Type 2 (Misattribution):** citing a retrieved source that is irrelevant to the claim.
+3. **Type 3 (Reasoning error):** citing a relevant source but drawing a flawed conclusion.
+4. **Type 4 (Retrieval failure):** the necessary evidence is missing from the retrieved set.
 
-### **The AuRAG Solution**
-AuRAG introduces a two-layer defense architecture to address these:
+A fabricated identifier is the worst case for auditing, because there is no document to check. Prompting alone does not rule it out.
 
--   **Layer 1: SPHR (Structure-Preserving Hierarchical Retrieval)**
-    -   *Mitigates Type 4 (Retrieval Failure).*
-    -   Indexes small child chunks for precise search, but retrieves full parent sections based on legal document structure (Sections/Articles).
-    -   **Novelty:** Represents Domain Adaptation Novelty, leveraging the specific "legal document structure" to maximize retrieval specificity while maintaining contextual integrity.
-    -   Ensures the LLM reasoning window contains complete statutory context, not just fragmented keywords.
+## Approach
 
--   **Layer 2: RDG (Retrieval-Dependent Grammars)**
-    -   *Eliminates Type 1 (Fabrication) & Mitigates Type 2/3.*
-    -   Constructs a **dynamic GBNF grammar** on-the-fly based *only* on the retrieved context.
-    -   **Novelty:** Represents Technical/Architectural Novelty, solving the problem of Syntactic Correctness (guaranteeing valid citations). Unlike static grammars (IDG, Geng et al., 2023), AuRAG's grammar adapts to the retrieval set dynamically.
-    -   Enforces **Structured Chain-of-Thought (CoT)**: `Premise → Inference → Conclusion` to improve reasoning quality.
+### Layer 1: provision-aligned hierarchical retrieval
+*Targets Type 4.*
 
+- Splits each document at its own provision boundaries (Japanese articles, `Section N`, `Article N`, numbered clauses) and keeps each provision as a parent unit with a stable ID.
+- Embeds small child spans (about 300 tokens, split at sentence and clause boundaries) for precise matching, then returns the full parent provision to the LLM.
+- Links inline cross-references (for example "see Section 12" or "第七条") to the referenced provision, so related provisions can be returned together.
+- Supports dense, BM25, and hybrid ranking (weighted reciprocal rank fusion), with a token budget on the returned context.
 
----
+### Layer 2: citation-constrained decoding
+*Eliminates Type 1 for grammar-accepted outputs and reduces Types 2 and 3.*
 
-## 🛠 **Technical Implementation**
+- Builds a GBNF grammar for each query from the identifiers that were retrieved, so the citation fields can only contain those identifiers.
+- Forces a structured reasoning format: each step holds an extracted snippet, a deduction, a step type (`premise`, `inference`, `conclusion`), and its citations, followed by the answer.
+- Generation runs locally with `llama-cpp-python`; the main pipeline makes no API calls.
 
-### **Layer 1: Retrieval Stack**
--   **Engine:** `LangChain` + `ChromaDB`.
--   **Embeddings:** `BAAI/bge-small-en-v1.5`.
--   **Cross-Reference Enrichment:** Resolves internal pointers (e.g., "see §123") before embedding, ensuring chunks are self-contained (Regex-based).
+The guarantee is about membership only: a cited identifier always belongs to the retrieved set. It does not mean the cited provision is relevant, current, or legally correct.
 
-### **Layer 2: Generative Stack**
--   **Inference:** `llama-cpp-python`.
--   **Model:** `Meta-Llama-3.1-8B-Instruct` (GGUF Quantization).
--   **Grammar:** Custom GBNF generator interacting directly with sampler logits to enforce citation constraints.
+## Technical stack
 
----
+| Component | Choice |
+|---|---|
+| Orchestration | LangChain |
+| Vector store | ChromaDB |
+| Embeddings | `BAAI/bge-small-en-v1.5` (CLI default), `intfloat/multilingual-e5-*` (COLIEE evaluation) |
+| Sparse retrieval | `rank-bm25` (Japanese handled with character bigrams) |
+| LLM inference | `llama-cpp-python`, `Meta-Llama-3.1-8B-Instruct` (GGUF, Q4_K_M) |
+| Constraint | Custom GBNF grammar generated per query |
 
-## 🚀 **Quick Start**
+## Quick start
 
-### **Prerequisites**
--   Python 3.10+
--   `make`, `cmake` (for llama.cpp build)
+### Prerequisites
+- Python 3.10+
+- `make`, `cmake` (for the llama.cpp build)
 
-### **One-Click Setup (Recommended)**
+### One-step setup (recommended)
 
-AuRAG includes a setup script that creates the environment, downloads the GGUF model, and prepares the data format.
+The setup script creates the environment, downloads the GGUF model, and prepares the data folders.
 
 ```bash
-git clone https://github.com/yourusername/AuRAG.git
-cd AuRAG
+git clone https://github.com/BrianTr9/Auditable-RAG-Legal.git
+cd Auditable-RAG-Legal
 chmod +x setup.sh
 ./setup.sh
 ```
 
-### **Manual Installation**
+### Manual installation
 
-If you prefer to set up manually:
+1. **Environment and dependencies**
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
 
-1.  **Environment & Dependencies**
-    ```bash
-    python3 -m venv .venv
-    source .venv/bin/activate
-    pip install -r requirements.txt
-    ```
+2. **Models**
+   - LLM: download `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` (or similar) into `models/`.
+   - Embeddings: `BAAI/bge-small-en-v1.5` is downloaded automatically by HuggingFace.
 
-2.  **Download Models**
-    -   **LLM:** Download `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` (or similar) into `models/`.
-    -   **Embeddings:** AuRAG uses `BAAI/bge-small-en-v1.5` (auto-downloaded by HuggingFace).
+3. **Data**
+   - Create `data/raw/` and place your legal documents (`.pdf` or `.txt`) there.
+   - `data/processed/` and `data/vector_db/` are created when you run the program.
 
-3.  **Add Data**
-    -   Create `data/raw/` and place your legal documents (`.pdf` or `.txt`) there.
-    -   Other directories (`data/processed/`, `data/vector_db/`) are auto-created when you run the program.
-
-### **Running the System**
+### Running the pipeline
 ```bash
 python src/AuRAG.py
 ```
-*The system will automatically:*
-1.  Parse and hierarchically chunk your documents (SPHR).
-2.  Build/Rebuild the local vector database (Chroma).
-3.  Launch the interactive CLI for querying.
 
----
+The program will:
+1. Parse and chunk your documents hierarchically.
+2. Rebuild the local vector database (Chroma).
+3. Start an interactive CLI for questions.
 
-## 📊 **Evaluation (COLIEE 2025)**
+## Evaluation
 
-AuRAG is evaluated on the **COLIEE task 3 (Statute Law)** benchmark.
+The evaluation harness covers two benchmarks and reports retrieval and generation separately, so each layer can be tested on its own.
 
-### **Metrics**
--   **Citation Hallucination Rate (Type 1):** 0.0% (Guaranteed by RDG).
--   **Citation Precision/Recall:** Measures Type 2/3 errors against Ground Truth.
--   **Retrieval Hit@K / Recall@K:** Measures Layer 1 effectiveness.
+- **COLIEE Task 3 (statute law):** Japanese Civil Code, yes/no entailment questions with gold article IDs.
+- **CUAD (LegalBench-RAG):** long contracts with snippet-level ground truth.
 
-### **Run Evaluation**
+### Metrics
+- **Fabricated-citation rate:** share of cited IDs that are not in the retrieved set (zero by construction for grammar-accepted outputs).
+- **Citation precision and recall:** cited IDs against gold IDs, which reflects Type 2 and 3 errors.
+- **Retrieval Hit@K, Recall@K, MRR, NDCG@K:** Layer 1 quality. For CUAD, snippet recall, context tokens, and evidence density.
+- **Answer accuracy, JSON compliance, latency.**
+
+### Run
 ```bash
 # Minimal CLI (quick run)
 python3 evaluation/evaluate_end2end.py --year R06 --system aurag
@@ -127,34 +126,45 @@ python3 evaluation/evaluate_end2end.py \
     --rebuild-index \
     --seed 42
 
-# Layer-2 generation only (ideal retrieval)
+# Generation only, with gold articles as context (isolates Layer 2)
 python3 evaluation/evaluate_generation.py --mode rdg --llm-model <model.gguf> --n-ctx <ctx> --max-tokens auto
+
+# Retrieval only (isolates Layer 1)
+python3 evaluation/evaluate_retrieval.py --system sphr --top-k "3,5,10" --retrieval-mode hybrid
 ```
 
----
+Baselines available in the harness: fixed-window flat chunking, prompt-only JSON generation (no grammar), and GPT-4o (set `OPENAI_API_KEY`).
 
-## 📁 **Project Structure**
+## Limitations
+
+- The constraint applies to the citation fields. Free text elsewhere in the output is not constrained.
+- Constrained decoding is slower than prompt-only decoding in this implementation; grammar compilation and caching are not optimized.
+- Version selection (amendments, repealed provisions, jurisdictions) is outside the current retrieval and grammar.
+- Cross-reference linking is pattern-based, so unusual citation styles may be missed.
+
+## Project structure
 ```
-AuRAG/
+.
 ├── src/
-│   ├── AuRAG.py       # Main pipeline entry point
-│   ├── SPHR.py        # Layer 1: Hierarchical Chunking & Retrieval
-│   └── RDG.py         # Layer 2: Grammar-Constrained Generation
+│   ├── AuRAG.py       # Pipeline entry point and CLI
+│   ├── SPHR.py        # Layer 1: hierarchical chunking and retrieval
+│   └── RDG.py         # Layer 2: grammar-constrained generation
 ├── evaluation/
-│   ├── evaluate_end2end.py   # End-to-end (retrieval + generation) benchmark
-│   ├── evaluate_generation.py # Layer-2 generation eval with GT retrieval
-│   └── systems/              # System wrappers for evaluation
+│   ├── evaluate_end2end.py     # Retrieval + generation benchmark
+│   ├── evaluate_generation.py  # Layer 2 evaluation with gold context
+│   ├── evaluate_retrieval.py   # Layer 1 evaluation
+│   ├── adapters/               # Dataset loaders (COLIEE, CUAD, HousingQA)
+│   └── systems/                # System wrappers used by the benchmark
+├── benchmark/COLIEE/  # Civil Code corpus and query sets
 ├── data/
 │   ├── raw/           # Input documents
 │   └── vector_db/     # Persistent ChromaDB
 └── models/            # GGUF models
 ```
 
----
-
-## **License**
+## License
 MIT License. See [LICENSE](LICENSE) for details.
 
-## **Author**
+## Author
 **Trung Bao (Brian) Truong**  
 *Honours Thesis Project*
