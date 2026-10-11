@@ -336,7 +336,9 @@ def build_sphr_index(
         encode_kwargs={'normalize_embeddings': normalize_embeddings}
     )
 
-    if rebuild_index and persist_dir.exists():
+    # Always index from scratch: Chroma.from_documents appends to an existing collection, and
+    # duplicate vectors would silently shrink the effective top-k. (rebuild_index kept for CLI compatibility.)
+    if persist_dir.exists():
         shutil.rmtree(persist_dir)
 
     vectordb = Chroma.from_documents(
@@ -386,7 +388,9 @@ def build_flat_index(
         encode_kwargs={'normalize_embeddings': normalize_embeddings}
     )
 
-    if rebuild_index and persist_dir.exists():
+    # Always index from scratch: Chroma.from_documents appends to an existing collection, and
+    # duplicate vectors would silently shrink the effective top-k. (rebuild_index kept for CLI compatibility.)
+    if persist_dir.exists():
         shutil.rmtree(persist_dir)
 
     vectordb = Chroma.from_documents(

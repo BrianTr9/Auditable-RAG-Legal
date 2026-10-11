@@ -26,5 +26,8 @@ huggingface-hub>=0.34.0,<1.0.0
 # Sparse retrieval
 rank-bm25>=0.2.2
 
+# Token counting for SPHR chunking and CUAD context/density metrics (required by src/SPHR.py)
+tiktoken>=0.5.0
+
 # OpenAI API limit for baselines
 openai>=1.0.0
