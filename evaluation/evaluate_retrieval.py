@@ -456,6 +456,11 @@ def calculate_snippet_retrieval_metrics(retrieved_docs: List[Document], gt_snipp
     - Recall: fraction of gt_snippets found.
     - Precision: fraction of retrieved_docs that contain at least one gt_snippet.
     - MRR: Highest rank (idx + 1) among retrieved_docs that contains at least one gt_snippet.
+    - NDCG: binary gain per retrieved doc, counted only when the doc contains at least one
+      gt_snippet that no higher-ranked doc already matched (novelty-aware gain). Without this,
+      overlapping chunks that contain the same snippet are counted repeatedly while the ideal
+      DCG counts each snippet once, which lets NDCG exceed 1. With it, DCG <= IDCG always,
+      so NDCG is in [0, 1]. IDCG keeps the documented normalisation min(|GT|, |returned|).
     """
     relevant_snippets_total = len(gt_snippets)
     
@@ -479,10 +484,12 @@ def calculate_snippet_retrieval_metrics(retrieved_docs: List[Document], gt_snipp
         
     found_snippets = set()
     relevant_doc_indices = []
+    novel_doc_indices = []  # docs that add >=1 snippet not matched at a higher rank (NDCG gain)
     found_snippet_tokens = 0
     
     for i, doc in enumerate(retrieved_docs):
         doc_is_relevant = False
+        doc_adds_new_snippet = False
         for s_idx, snippet_dict in enumerate(gt_snippets):
             # snippet_dict contains 'file_path', 'span', 'answer'
             # The actual snippet text might be in 'span' or 'answer' depending on CUAD
@@ -495,6 +502,7 @@ def calculate_snippet_retrieval_metrics(retrieved_docs: List[Document], gt_snipp
             if snippet_text in doc.page_content:
                 if s_idx not in found_snippets:
                     found_snippets.add(s_idx)
+                    doc_adds_new_snippet = True
                     if encoding:
                         found_snippet_tokens += len(encoding.encode(snippet_text))
                     else:
@@ -503,6 +511,8 @@ def calculate_snippet_retrieval_metrics(retrieved_docs: List[Document], gt_snipp
         
         if doc_is_relevant:
             relevant_doc_indices.append(i)
+        if doc_adds_new_snippet:
+            novel_doc_indices.append(i)
             
     recall = len(found_snippets) / relevant_snippets_total
     precision = len(relevant_doc_indices) / len(retrieved_docs) if retrieved_docs else 0.0
@@ -515,7 +525,7 @@ def calculate_snippet_retrieval_metrics(retrieved_docs: List[Document], gt_snipp
     mrr = 1.0 / (relevant_doc_indices[0] + 1) if relevant_doc_indices else 0.0
     
     dcg = 0.0
-    for idx in relevant_doc_indices:
+    for idx in novel_doc_indices:
         dcg += 1.0 / math.log2(idx + 2)
     
     ideal_hits = min(relevant_snippets_total, len(retrieved_docs))
