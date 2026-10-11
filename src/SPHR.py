@@ -48,6 +48,8 @@ class Chunk:
         char_start: Starting character position in original document
         char_end: Ending character position in original document
         contract_id: Identifier of source contract
+        provision: True for heading-delimited provisions (and their parts); False for the
+            preamble and the whole-document fallback, which are not cross-reference targets
     """
     text: str
     chunk_id: str
@@ -59,7 +61,8 @@ class Chunk:
     char_start: int = 0
     char_end: int = 0
     contract_id: str = None
-    
+    provision: bool = True
+
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization"""
         return asdict(self)
@@ -97,7 +100,9 @@ class HierarchicalChunker:
     # 1. KEYWORD FORMATS (Specific keyword -> Safe to put first)
     # Matches: ARTICLE I - Title, Part 1: Title...
     # Allow optional same-line title (may be redacted) so headers like "ARTICLE I." match
-    (r'(?:ARTICLE|Article|PART|Part|SECTION|Section)\s+([IVX]+|\d+)\s*(?:[-:.]\s*|\s+)(?:\*+(?:\s+\*+)*\s*)?([A-Z](?:(?!\.{3,}\s*\d)[^\n])*?)?(?=\n|$)', 'Keyword (Article/Part/Section) Format'),
+    # Anchored at line start (indentation allowed) so that "... set forth in Section 2." in
+    # running text is a reference, not a heading.
+    (r'^[ \t]*(?:ARTICLE|Article|PART|Part|SECTION|Section)\s+([IVX]+|\d+)\s*(?:[-:.]\s*|\s+)(?:\*+(?:\s+\*+)*\s*)?([A-Z](?:(?!\.{3,}\s*\d)[^\n])*?)?(?=\n|$)', 'Keyword (Article/Part/Section) Format'),
 
     # 2. NESTED DECIMALS (Must be before Bare Decimals to avoid partial match)
     # Matches: 1.1, 1.1.1, 2.1.3...
@@ -126,7 +131,9 @@ class HierarchicalChunker:
         # Also matches: "see Section 1", "refer to Article II", "Section 1 above", "as described in Part 2"
         # Matches: Section/Article/Part/Subsection/Clause/Paragraph + section number
         # Also matches abbreviations: Sec./Art./Para. (with dot) and symbols: §/¶ (with or without space)
-        r'(?:section|article|part|subsection|clause|paragraph|sec\.|art\.|para\.)\s+([IVX]+|\d+(?:\.\d+)*)|(?:§|¶)\s*([IVX]+|\d+(?:\.\d+)*)',
+        # Roman numerals must end at a word boundary: under IGNORECASE, "clause is" / "part in"
+        # would otherwise capture "i" as Section I.
+        r'(?:section|article|part|subsection|clause|paragraph|sec\.|art\.|para\.)\s+([IVX]+\b|\d+(?:\.\d+)*)|(?:§|¶)\s*([IVX]+\b|\d+(?:\.\d+)*)',
         
         # 2. Parenthetical/bracketed references: "(Section 1)", "[Article II]", "(see §3)"
         # Matches: references enclosed in parentheses or brackets (symbols §/¶ with or without space)
@@ -355,11 +362,14 @@ class HierarchicalChunker:
     
     def extract_sections(self, contract_text: str) -> List[Dict]:
         """
-        Extract hierarchical sections from structured document
-        
-        Expected format: "1.1 Provision of Services." or "2. Compensation." in running text
-        Strategy: Group subsections (1.1, 1.2) into major section (1)
-        
+        Extract heading-delimited provisions from a structured document
+
+        Headings start a line, e.g. "ARTICLE II - PAYMENT", "1.1 Provision of Services.",
+        "2. Compensation.", "第五条　...". Subsections (1.1, 1.2) are grouped into their major
+        section (1). The returned sections partition the document: a preamble ('0') holds any
+        text before the first provision, and a document without headings is one parent
+        ('1', 'Full Document'). See _detect_headings and _provision_starts for the rules.
+
         Args:
             contract_text: Text to extract sections from
             
@@ -377,118 +387,114 @@ class HierarchicalChunker:
         if not contract_text:
             raise ValueError("contract_text is empty after stripping")
         
-        # Try patterns in priority order (DRY: use class constant)
-        matches = []
-        
-        for pattern_idx, (pattern, pattern_name) in enumerate(self.SECTION_PATTERNS):
-            matches = list(re.finditer(pattern, contract_text, re.MULTILINE))
-            if matches:
-                print(f"📋 Found {len(matches)} sections using pattern {pattern_idx + 1} ({pattern_name})")
-                break
-        
-        if not matches:
+        headings = self._detect_headings(contract_text)
+        if not headings:
             print("⚠️  No structured sections found, using entire document as one parent")
-            return [{
-                'section_num': '1',
-                'title': 'Full Document',
-                'text': contract_text,
-                'char_start': 0,
-                'char_end': len(contract_text),
-                'token_count': self.count_tokens(contract_text)
-            }]
-        
-        # Group subsections into major sections
-        # E.g., 1.1, 1.2, 1.3 → Section 1
-        major_sections = {}
-        
-        for i, match in enumerate(matches):
-            groupdict = match.groupdict() if hasattr(match, 'groupdict') else {}
+            return [self._make_section(contract_text, 0, len(contract_text), '1', 'Full Document', provision=False)]
 
-            section_num = (groupdict.get('section') or match.group(1) or '').strip()
-            if section_num.startswith('第') and '条' in section_num:
-                section_num = self._normalize_japanese_article_identifier(section_num)
+        starts = self._provision_starts(headings, len(contract_text))
 
-            # Title may be optional or come from a named group (e.g., Japanese caption line)
-            section_title = (groupdict.get('title') or "").strip()
-            if not section_title:
-                # Fallback to first non-empty captured group after section_num
-                for group_idx in range(2, len(match.groups()) + 1):
-                    val = match.group(group_idx)
-                    if val:
-                        section_title = val.strip()
-                        break
-            
-            # Get major section number (first digit before dot)
-            if '.' in section_num:
-                major_num = section_num.split('.')[0]
-            else:
-                major_num = section_num
-            
-            # Initialize major section if first time seeing it
-            if major_num not in major_sections:
-                major_sections[major_num] = {
-                    'section_num': major_num,
-                    'title': section_title,  # Use first subsection's title
-                    'start_pos': match.start(),
-                    'first_match_idx': i
-                }
-        
-        # Now determine end positions for each major section
         result_sections = []
-        # Sort by document order (preserve appearance order, not numeric value)
-        major_nums = sorted(major_sections.keys(), key=lambda x: major_sections[x]['first_match_idx'])
-        
-        for idx, major_num in enumerate(major_nums):
-            sec = major_sections[major_num]
-            start_pos = sec['start_pos']
-            
-            # Find end: start of next major section or end of doc
-            if idx < len(major_nums) - 1:
-                next_major = major_sections[major_nums[idx + 1]]
-                end_pos = next_major['start_pos']
-            else:
-                end_pos = len(contract_text)
-            
-            section_text = contract_text[start_pos:end_pos]
-            
-            # Skip empty sections (check stripped version but keep original text)
-            if not section_text.strip():
-                print(f"  ⊘ Skipping empty Section {major_num}")
-                continue
-            
-            # Calculate actual start/end by stripping whitespace from boundaries
-            # while keeping the text and char positions aligned
-            stripped_text = section_text.strip()
-            leading_ws = len(section_text) - len(section_text.lstrip())
-            trailing_ws = len(section_text) - len(section_text.rstrip())
-            
-            result_sections.append({
-                'section_num': major_num,
-                'title': sec['title'],
-                'text': stripped_text,
-                'char_start': start_pos + leading_ws,
-                'char_end': end_pos - trailing_ws,
-                'token_count': self.count_tokens(stripped_text)
-            })
+        # Text before the first provision (title, recitals, table of contents) is kept as a
+        # preamble parent (section '0') so no part of the document is dropped.
+        preamble = self._make_section(contract_text, 0, starts[0][0], '0', 'Preamble', provision=False)
+        if preamble:
+            result_sections.append(preamble)
 
-        # If there is any content before the first detected section header,
-        # keep it as a separate preamble parent (section '0') so we don't drop
-        # titles/intros/cover text that appears before the first header.
-        if result_sections:
-            first_start = result_sections[0]['char_start']
-            if first_start > 0:
-                pre_text = contract_text[0:first_start].strip()
-                if pre_text:
-                    result_sections.insert(0, {
-                        'section_num': '0',
-                        'title': 'Preamble',
-                        'text': pre_text,
-                        'char_start': 0,
-                        'char_end': first_start,
-                        'token_count': self.count_tokens(pre_text)
-                    })
+        ends = [start for start, _, _ in starts[1:]] + [len(contract_text)]
+        for (start, major_num, title), end in zip(starts, ends):
+            section = self._make_section(contract_text, start, end, major_num, title, provision=True)
+            if section:
+                result_sections.append(section)
+            else:
+                print(f"  ⊘ Skipping empty Section {major_num}")
 
         return result_sections
+
+    def _make_section(self, text: str, start: int, end: int, section_num: str, title: str,
+                      provision: bool) -> Dict:
+        """Section dict for text[start:end], whitespace-trimmed with matching char offsets."""
+        raw = text[start:end]
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        char_start = start + len(raw) - len(raw.lstrip())
+        return {
+            'section_num': section_num,
+            'title': title,
+            'text': stripped,
+            'char_start': char_start,
+            'char_end': char_start + len(stripped),
+            'token_count': self.count_tokens(stripped),
+            'provision': provision,
+        }
+
+    def _match_section_num(self, match) -> str:
+        groupdict = match.groupdict()
+        section_num = (groupdict.get('section') or match.group(1) or '').strip()
+        if section_num.startswith('第') and '条' in section_num:
+            section_num = self._normalize_japanese_article_identifier(section_num)
+        return section_num
+
+    @staticmethod
+    def _match_title(match) -> str:
+        # Title may come from a named group (e.g., Japanese caption line) or the first
+        # non-empty captured group after the section number.
+        title = (match.groupdict().get('title') or "").strip()
+        if not title:
+            for group_idx in range(2, len(match.groups()) + 1):
+                val = match.group(group_idx)
+                if val:
+                    title = val.strip()
+                    break
+        return title
+
+    def _detect_headings(self, text: str) -> List[Tuple[int, str, str]]:
+        """Headings (start, section_num, title) in document order, or [] if none delimit the text.
+
+        Patterns are tried in priority order. A pattern is accepted only if its headings can
+        delimit provisions: they name at least two distinct major sections, or the single
+        provision they name starts at the beginning of the text (a corpus unit that is itself
+        one provision, e.g. a statute article). One stray line that happens to look like a
+        heading therefore cannot override the structure found by a later pattern.
+        """
+        for pattern_idx, (pattern, pattern_name) in enumerate(self.SECTION_PATTERNS):
+            headings = [
+                (m.start(), self._match_section_num(m), self._match_title(m))
+                for m in re.finditer(pattern, text, re.MULTILINE)
+            ]
+            if not headings:
+                continue
+            majors = {num.split('.')[0] for _, num, _ in headings}
+            if len(majors) >= 2 or headings[0][0] == 0:
+                print(f"📋 Found {len(headings)} sections using pattern {pattern_idx + 1} ({pattern_name})")
+                return headings
+        return []
+
+    @staticmethod
+    def _provision_starts(headings: List[Tuple[int, str, str]], text_len: int) -> List[Tuple[int, str, str]]:
+        """Reduce headings to one start (start, major_num, title) per provision.
+
+        1. Consecutive headings with the same major number open one provision
+           (1.1, 1.2, 1.3 -> Section 1, titled by its first heading).
+        2. A major number that opens several provisions (a table of contents listing the
+           headings, or numbering restarted later) keeps the occurrence with the longest span;
+           the other occurrences stay inside the parent that precedes them. Parents therefore
+           keep unique IDs and still partition the document.
+        """
+        starts = []
+        for start, section_num, title in headings:
+            major_num = section_num.split('.')[0]
+            if starts and starts[-1][1] == major_num:
+                continue
+            starts.append((start, major_num, title))
+
+        ends = [start for start, _, _ in starts[1:]] + [text_len]
+        longest = {}
+        for (start, major_num, _), end in zip(starts, ends):
+            if major_num not in longest or end - start > longest[major_num][0]:
+                longest[major_num] = (end - start, start)
+        return [s for s in starts if longest[s[1]][1] == s[0]]
     
     @staticmethod
     def _section_to_parent_chunk(sec: Dict, contract_id: str) -> Chunk:
@@ -503,7 +509,8 @@ class HierarchicalChunker:
             token_count=sec['token_count'],
             char_start=sec['char_start'],
             char_end=sec['char_end'],
-            contract_id=contract_id
+            contract_id=contract_id,
+            provision=sec.get('provision', True),
         )
     
     def create_parent_chunks(self, sections: List[Dict], contract_id: str = "contract") -> List[Chunk]:
@@ -573,7 +580,8 @@ class HierarchicalChunker:
                     token_count=token_count,
                     char_start=char_start,
                     char_end=char_end,
-                    contract_id=parent.contract_id
+                    contract_id=parent.contract_id,
+                    provision=parent.provision,
                 )
                 new_parents.append(new_parent)
 
@@ -918,7 +926,13 @@ class HierarchicalChunker:
         Enrich parent_to_children mapping by detecting cross-references in child text.
         
         When a child mentions another section (e.g., "See Section 2" inside Section 1),
-        add that child to both parent's children lists, creating a lightweight graph.
+        add that child to the referenced parent's children list as well, creating a
+        lightweight graph: retrieving the child then expands to {host} U refs.
+        
+        Links are document-scoped and only target provisions (heading-delimited parents).
+        A reference to a provision that was split into parts links every part, so the
+        referenced provision is returned whole. The preamble and the whole-document
+        fallback are never targets.
         
         Uses CROSS_REF_PATTERNS class constant for inline section detection.
         
@@ -930,96 +944,60 @@ class HierarchicalChunker:
         Returns:
             Enriched parent_to_children mapping with cross-reference links
         """
-        # For each child, detect cross-references and add to related parents
-        for child in children:
-            if not child.text:
+        # contract_id -> {section_num: [parent_id, ...]} (all parts of a split provision)
+        targets_by_doc: Dict[str, Dict[str, List[str]]] = {}
+        for parent in parents:
+            if not parent.provision:
                 continue
-            
-            # Build section_num -> parent_id map for THIS child's document only
-            # (to avoid cross-document reference collisions where multiple docs have Section I, II, etc.)
-            section_num_to_parent_id = {}
-            for parent in parents:
-                # Only include parents from the same document as this child
-                if parent.contract_id == child.contract_id:
-                    section_num_to_parent_id[parent.section_num] = parent.chunk_id
-            
-            # Find all section references in child text using class constant patterns
-            referenced_section_nums = set()
-            
-            for pattern in self.CROSS_REF_PATTERNS:
-                # Find all matches of this pattern in child text (case-insensitive)
-                matches = re.finditer(pattern, child.text, re.IGNORECASE)
-                for match in matches:
-                    # Extract section number from match groups (may have multiple groups due to alternation)
-                    # Try all groups, use first non-None value
-                    sec_num = None
-                    for group_idx in range(1, len(match.groups()) + 1):
-                        if match.group(group_idx):
-                            sec_num = match.group(group_idx)
-                            break
-                    if sec_num:
-                        # Normalize Japanese statute identifiers like "第三条の二" -> "3-2"
-                        # so they match parent.section_num values produced by extract_sections().
-                        if isinstance(sec_num, str) and sec_num.startswith('第') and '条' in sec_num:
-                            sec_num = self._normalize_japanese_article_identifier(sec_num)
-                        referenced_section_nums.add(sec_num)
-            
-            # Add child to each referenced parent (if it exists and isn't already there)
-            for sec_num in referenced_section_nums:
+            base_num = parent.section_num.split('_part_')[0]
+            targets_by_doc.setdefault(parent.contract_id, {}).setdefault(base_num, []).append(parent.chunk_id)
+
+        for child in children:
+            targets = targets_by_doc.get(child.contract_id)
+            if not targets or not child.text:
+                continue
+            for sec_num in self._find_cross_refs(child.text):
+                for parent_id in self._resolve_cross_ref(sec_num, targets):
+                    linked = parent_to_children.setdefault(parent_id, [])
+                    if child.chunk_id not in linked:
+                        linked.append(child.chunk_id)
+
+        return parent_to_children
+
+    def _find_cross_refs(self, text: str) -> List[str]:
+        """Section numbers referenced in text, in order of first mention."""
+        found = []
+        for pattern in self.CROSS_REF_PATTERNS:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                # Patterns use alternation, so take the first non-empty group.
+                sec_num = next((g for g in match.groups() if g), None)
                 if not sec_num:
                     continue
+                if sec_num.startswith('第') and '条' in sec_num:
+                    sec_num = self._normalize_japanese_article_identifier(sec_num)
+                if sec_num not in found:
+                    found.append(sec_num)
+        return found
 
-                parent_id = None
+    def _resolve_cross_ref(self, sec_num: str, targets: Dict[str, List[str]]) -> List[str]:
+        """Parent IDs for a referenced section number within one document.
 
-                # Try exact match first
-                parent_id = section_num_to_parent_id.get(sec_num)
-
-                # If not found, attempt numeral normalization lookups
-                if not parent_id and isinstance(sec_num, str):
-                    sec_norm = sec_num.strip()
-                    # If reference is Arabic (digits), try Roman match (e.g., '5' -> 'V')
-                    if sec_norm.isdigit():
-                        try:
-                            arabic = int(sec_norm)
-                            roman = self._arabic_to_roman(arabic)
-                            if roman:
-                                parent_id = section_num_to_parent_id.get(roman)
-                        except Exception:
-                            pass
-                    else:
-                        # If reference looks like Roman, try Arabic match (e.g., 'V' -> '5')
-                        arabic_val = self._roman_to_arabic(sec_norm)
-                        if arabic_val > 0:
-                            parent_id = section_num_to_parent_id.get(str(arabic_val))
-
-                # If still not found, and sec_num is a subsection like '1.2', try major section
-                if not parent_id and isinstance(sec_num, str) and '.' in sec_num:
-                    major_sec_num = sec_num.split('.')[0]
-                    parent_id = section_num_to_parent_id.get(major_sec_num)
-
-                    # If major still not found, try normalization on major
-                    if not parent_id:
-                        major_norm = major_sec_num.strip()
-                        if major_norm.isdigit():
-                            try:
-                                roman = self._arabic_to_roman(int(major_norm))
-                                if roman:
-                                    parent_id = section_num_to_parent_id.get(roman)
-                            except Exception:
-                                pass
-                        else:
-                            arabic_val = self._roman_to_arabic(major_norm)
-                            if arabic_val > 0:
-                                parent_id = section_num_to_parent_id.get(str(arabic_val))
-
-                # Add child to this parent if found and not already linked
-                if parent_id:
-                    if parent_id not in parent_to_children:
-                        parent_to_children[parent_id] = []
-                    if child.chunk_id not in parent_to_children.get(parent_id, []):
-                        parent_to_children[parent_id].append(child.chunk_id)
-        
-        return parent_to_children
+        Tries the number as written, then its Roman/Arabic counterpart ('5' <-> 'V'),
+        then the same for its major section when the reference names a subsection ('1.2' -> '1').
+        """
+        candidates = [sec_num.strip()]
+        if '.' in candidates[0]:
+            candidates.append(candidates[0].split('.')[0])
+        for num in candidates:
+            if num.isdigit():
+                alternate = self._arabic_to_roman(int(num))
+            else:
+                arabic = self._roman_to_arabic(num)
+                alternate = str(arabic) if arabic > 0 else None
+            for key in (num, alternate):
+                if key and key in targets:
+                    return targets[key]
+        return []
 
 
 # Demo utilities were removed from the library module to keep the file
@@ -1091,28 +1069,29 @@ class HierarchicalRetriever:
         self.child_ids = []
         self.bm25 = None
 
+        # Metadata gives each child's host parent and the BM25 corpus. Fail loudly if it cannot
+        # be read: silently switching a hybrid run to dense would change reported results.
         try:
             raw = self.vectordb.get(include=["metadatas", "documents"])
-            metadatas = raw.get("metadatas", []) if raw else []
-            documents = raw.get("documents", []) if raw else []
+        except Exception as exc:
+            raise RuntimeError(f"Could not read child metadata from the vector store: {exc}") from exc
+        metadatas = raw.get("metadatas", []) if raw else []
+        documents = raw.get("documents", []) if raw else []
 
-            for metadata, text in zip(metadatas, documents):
-                if not metadata:
-                    continue
-                chunk_id = metadata.get("chunk_id")
-                parent_id = metadata.get("parent_id")
-                if not chunk_id:
-                    continue
-                self.child_ids.append(chunk_id)
-                self.child_id_to_parent[chunk_id] = parent_id
-                self.child_id_to_text[chunk_id] = text or ""
+        for metadata, text in zip(metadatas, documents):
+            if not metadata:
+                continue
+            chunk_id = metadata.get("chunk_id")
+            parent_id = metadata.get("parent_id")
+            if not chunk_id:
+                continue
+            self.child_ids.append(chunk_id)
+            self.child_id_to_parent[chunk_id] = parent_id
+            self.child_id_to_text[chunk_id] = text or ""
 
-            if self.retrieval_mode in {"bm25", "hybrid"} and self.child_ids:
-                tokenized = [self._bm25_tokenize(self.child_id_to_text[cid]) for cid in self.child_ids]
-                self.bm25 = BM25Okapi(tokenized)
-        except Exception:
-            # Keep dense retrieval as fallback if vector store metadata fetch fails.
-            self.retrieval_mode = "dense"
+        if self.retrieval_mode in {"bm25", "hybrid"} and self.child_ids:
+            tokenized = [self._bm25_tokenize(self.child_id_to_text[cid]) for cid in self.child_ids]
+            self.bm25 = BM25Okapi(tokenized)
 
     @staticmethod
     def _bm25_tokenize(text: str) -> List[str]:
@@ -1202,11 +1181,11 @@ class HierarchicalRetriever:
         for child_id in ranked_child_ids:
             direct_parent_id = self.child_id_to_parent.get(child_id)
 
-            candidate_parent_ids = []
-            if child_id and child_id in self.child_to_parents:
-                candidate_parent_ids.extend(self.child_to_parents.get(child_id) or [])
-            if direct_parent_id:
-                candidate_parent_ids.append(direct_parent_id)
+            # Pi(c) = {host(c)} U refs(c): the host parent first, then cross-referenced parents.
+            candidate_parent_ids = [direct_parent_id] if direct_parent_id else []
+            candidate_parent_ids.extend(
+                pid for pid in (self.child_to_parents.get(child_id) or []) if pid != direct_parent_id
+            )
 
             # Preserve rank order: expand parents in the order we encounter children.
             for parent_id in candidate_parent_ids:
