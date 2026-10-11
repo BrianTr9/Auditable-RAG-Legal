@@ -324,7 +324,7 @@ def evaluate_rag_system(
             has_gt_answer = ground_truth is not None and str(ground_truth).strip() != ''
             gt_label = normalize_yn_answer(str(ground_truth)) if has_gt_answer else None
 
-            if has_gt_answer:
+            if gt_label is not None:
                 is_correct = 1 if predicted_label == gt_label else 0
             else:
                 is_correct = None
@@ -654,7 +654,7 @@ def main():
     
     # Embedding model mapping
     EMBEDDINGS_CONFIG = {
-        'multilingual': 'intfloat/multilingual-e5-base',
+        'multilingual': 'intfloat/multilingual-e5-small',  # same encoder as Layer-1 retrieval (evaluate_retrieval.py)
         'jp-bge': 'BAAI/bge-base-ja-v1.5',
         'en-bge': 'BAAI/bge-small-en-v1.5'
     }
@@ -685,7 +685,7 @@ def main():
     # Initialize system
     system = create_system(args.system)
     dataset_suffix = str(args.year).strip().upper() if args.dataset == 'coliee' else 'default'
-    db_path = output_dir / f"vector_db_{args.system}_{args.dataset}_{dataset_suffix}_{args.embedding}"
+    db_path = output_dir / f"vector_db_{args.system}_{args.dataset}_{dataset_suffix}_{args.embedding.replace('/', '_')}"
 
     system.setup(
         corpus=corpus,
@@ -734,6 +734,14 @@ def main():
             'dataset_name': args.dataset,
             'coliee_year': str(args.year).strip().upper() if args.dataset == 'coliee' else None,
             'queries_path_resolved': str(queries_path),
+            'embedding_model': embedding_model,
+            'child_chunk_size': args.child_chunk_size,
+            'child_chunk_overlap': args.child_chunk_overlap,
+            'top_k': args.top_k,
+            'n_ctx': args.n_ctx,
+            'max_tokens': args.max_tokens,
+            'citation_mode': args.citation_mode,
+            'seed': args.seed,
         }
     )
     

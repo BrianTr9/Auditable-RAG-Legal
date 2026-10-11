@@ -42,7 +42,7 @@ The guarantee is about membership only: a cited identifier always belongs to the
 |---|---|
 | Orchestration | LangChain |
 | Vector store | ChromaDB |
-| Embeddings | `BAAI/bge-small-en-v1.5` (CLI default), `intfloat/multilingual-e5-*` (COLIEE evaluation) |
+| Embeddings | `BAAI/bge-small-en-v1.5` (CLI default), `intfloat/multilingual-e5-small` (benchmark evaluation) |
 | Sparse retrieval | `rank-bm25` (Japanese handled with character bigrams) |
 | LLM inference | `llama-cpp-python`, `Meta-Llama-3.1-8B-Instruct` (GGUF, Q4_K_M) |
 | Constraint | Custom GBNF grammar generated per query |
@@ -118,7 +118,7 @@ python3 evaluation/evaluate_end2end.py \
     --embedding multilingual \
     --llm-model models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf \
     --n-ctx 16384 \
-    --max-tokens auto \
+    --max-tokens 2048 \
     --top-k 5 \
     --retrieval-mode hybrid \
     --bm25-weight 0.5 \
@@ -127,7 +127,7 @@ python3 evaluation/evaluate_end2end.py \
     --seed 42
 
 # Generation only, with gold articles as context (isolates Layer 2)
-python3 evaluation/evaluate_generation.py --mode rdg --llm-model <model.gguf> --n-ctx <ctx> --max-tokens auto
+python3 evaluation/evaluate_generation.py --mode rdg --llm-model <model.gguf> --n-ctx <ctx> --max-tokens 2048
 
 # Retrieval only (isolates Layer 1)
 python3 evaluation/evaluate_retrieval.py --system sphr --top-k "3,5,10" --retrieval-mode hybrid

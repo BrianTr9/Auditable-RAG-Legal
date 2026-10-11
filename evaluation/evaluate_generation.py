@@ -528,7 +528,7 @@ def main():
         queries = random.sample(queries, min(args.sample_queries, len(queries)))
 
     max_tokens = parse_max_tokens_arg(args.max_tokens)
-    citation_mode_applied = args.citation_mode if args.mode == 'prompt' else 'rdg_internal'
+    citation_mode_applied = 'rdg_internal' if args.mode == 'rdg' else args.citation_mode
     if args.mode == 'rdg' and args.citation_mode != 'short':
         print("ℹ️  --citation-mode is ignored in RDG mode (using RDG internal citation extraction).")
 
@@ -557,6 +557,8 @@ def main():
             'num_queries': len(per_query_results),
             'max_tokens_requested': args.max_tokens,
             'max_tokens_mode': 'auto' if max_tokens is None else 'fixed',
+            'n_ctx': args.n_ctx,
+            'seed': args.seed,
         },
         'aggregate_metrics': aggregate_metrics,
         'per_query_results': per_query_results

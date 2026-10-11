@@ -243,9 +243,10 @@ class FlatPromptSystem(RAGSystem):
 
         # ── Layer 2: Prompt-only generation ──────────────────────────────────
         # Calls the IDENTICAL prompt_only_generate() used in evaluate_generation.py.
+        # Model load on the first query is kept out of generation_time (same as AuRAGSystem).
+        rdg = self._get_rdg()
         t1 = time.time()
         try:
-            rdg = self._get_rdg()
             result = prompt_only_generate(
                 rdg=rdg,
                 question=question,

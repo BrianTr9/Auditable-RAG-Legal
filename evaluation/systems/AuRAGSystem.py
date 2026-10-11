@@ -10,18 +10,18 @@ import sys
 import time
 from pathlib import Path
 from typing import Dict, Any, List
-import shutil
 
-# Add src/ to path to import AuRAG modules
-src_path = Path(__file__).parent.parent.parent / "src"
-sys.path.insert(0, str(src_path))
+# Add project root and src/ so imports resolve regardless of cwd
+_ROOT = Path(__file__).parent.parent.parent
+for _p in (str(_ROOT), str(_ROOT / "src")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-
-from SPHR import HierarchicalChunker, HierarchicalRetriever
 from RDG import get_rdg_pipeline, DEFAULT_N_CTX as RDG_DEFAULT_N_CTX
+
+# Retrieval: re-use EXACTLY the same index builder as evaluate_retrieval.py (system=sphr),
+# so the end-to-end SPHR (incl. cross-reference enrichment) is the one reported in Layer 1.
+from evaluation.evaluate_retrieval import build_sphr_index
 
 from .base import RAGSystem
 
@@ -111,110 +111,25 @@ class AuRAGSystem(RAGSystem):
         print(f"  - Embedding device: {kwargs.get('device', 'cpu')}")
         print(f"  - Rebuild index: {rebuild_index}")
         
-        # Step 1: Hierarchical chunking (SPHR Layer 1)
-        print(f"\n🔹 Step 1: Hierarchical Chunking (SPHR)")
-        chunker = HierarchicalChunker(
-            child_size=child_chunk_size,
-            child_overlap=child_chunk_overlap
-        )
-        
-        all_parent_chunks = []
-        all_child_chunks = []
-        parent_to_children = {}
-        
-        for article_id, article_data in corpus.items():
-            article_text = article_data['text']
-            # IMPORTANT: use canonical corpus unit_id as contract_id.
-            # Captions are human-readable labels, not stable retrieval ids.
-            unit_id = str(article_id)
-            
-            # Generate hierarchical chunks using chunk_contract method
-            parent_chunks, child_chunks = chunker.chunk_contract(
-                article_text,
-                contract_id=unit_id
-            )
-            
-            all_parent_chunks.extend(parent_chunks)
-            all_child_chunks.extend(child_chunks)
-            
-            # Build parent-child mapping
-            for parent in parent_chunks:
-                parent_id = parent.chunk_id
-                parent_to_children[parent_id] = [
-                    child.chunk_id for child in child_chunks
-                    if child.parent_id == parent_id
-                ]
-        
-        print(f"  ✓ Created {len(all_parent_chunks)} parent chunks")
-        print(f"  ✓ Created {len(all_child_chunks)} child chunks")
-        
-        # Step 2: Build vector database
-        print(f"\n🔹 Step 2: Building Vector Database")
-        splits = [
-            Document(
-                page_content=child.text,
-                metadata={
-                    'chunk_id': child.chunk_id,
-                    'chunk_type': 'child',
-                    'parent_id': child.parent_id,
-                    'section_num': child.section_num,
-                    'section_title': child.section_title,
-                    'contract_id': child.contract_id,  # This is the article number
-                    'token_count': child.token_count
-                }
-            )
-            for child in all_child_chunks
-        ]
-        
-        device = kwargs.get('device', 'cpu')
-        normalize_embeddings = kwargs.get('normalize_embeddings', True)
-        embedding = HuggingFaceEmbeddings(
-            model_name=embedding_model,
-            model_kwargs={'device': device},
-            encode_kwargs={'normalize_embeddings': normalize_embeddings}
-        )
-
-        # IMPORTANT: Avoid duplicating vectors across repeated runs.
-        # - If a persisted DB exists and is non-empty, reuse it.
-        # - Otherwise, build from scratch via Chroma.from_documents.
-        if rebuild_index and db_path.exists():
-            shutil.rmtree(db_path)
-
-        existing_count = 0
-        if db_path.exists():
-            try:
-                candidate = Chroma(
-                    persist_directory=str(db_path),
-                    embedding_function=embedding,
-                )
-                existing_count = candidate._collection.count()
-                if existing_count > 0:
-                    self.vectordb = candidate
-            except Exception:
-                existing_count = 0
-
-        if existing_count > 0:
-            print(f"  ✓ Reusing existing index ({existing_count} vectors)")
-        else:
-            self.vectordb = Chroma.from_documents(
-                documents=splits,
-                embedding=embedding,
-                persist_directory=str(db_path),
-            )
-            print(f"  ✓ Indexed {self.vectordb._collection.count()} vectors")
-        
-        # Step 3: Initialize hierarchical retriever
-        print(f"\n🔹 Step 3: Initializing Hierarchical Retriever")
-        self.retriever = HierarchicalRetriever(
-            self.vectordb,
-            all_parent_chunks,
-            parent_to_children,
+        # Steps 1-3: SPHR chunking, cross-reference enrichment, vector index and retriever.
+        # Calls the IDENTICAL build_sphr_index() used in evaluate_retrieval.py.
+        print(f"\n🔹 Steps 1-3: SPHR Index (same builder as Layer-1 evaluation)")
+        self.retriever = build_sphr_index(
+            corpus=corpus,
+            embedding_model=embedding_model,
+            child_chunk_size=child_chunk_size,
+            child_chunk_overlap=child_chunk_overlap,
             top_k=self.top_k,
             context_budget=self.context_budget,
+            persist_dir=Path(db_path),
+            device=kwargs.get('device', 'cpu'),
+            normalize_embeddings=kwargs.get('normalize_embeddings', True),
+            rebuild_index=rebuild_index,
             retrieval_mode=self.retrieval_mode,
             bm25_weight=self.bm25_weight,
             rrf_k=self.rrf_k,
         )
+        self.vectordb = self.retriever.vectordb
         print(f"  ✓ Retriever ready")
         
         # Step 4: Initialize RDG pipeline (lazy loading for efficiency)
@@ -290,10 +205,10 @@ class AuRAGSystem(RAGSystem):
                 'generation_time': 0.0
             }
         
-        # Step 2: Generate with RDG
+        # Step 2: Generate with RDG (model load on the first query is kept out of generation_time)
+        rdg = self._get_rdg()
         t1 = time.time()
         try:
-            rdg = self._get_rdg()
             structured_output = rdg.generate(
                 question=question,
                 documents=docs,

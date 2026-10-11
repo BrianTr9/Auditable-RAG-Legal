@@ -39,7 +39,7 @@ class ColieeAdapter(DatasetAdapter):
         queries: List[Query] = []
         for pair in root.findall("pair"):
             pair_id = pair.get("id")
-            ground_truth = (pair.get("label") or "N").strip()
+            ground_truth = (pair.get("label") or "").strip() or None
             t2_elem = pair.find("t2")
             question = "".join(t2_elem.itertext()).strip() if t2_elem is not None else ""
 

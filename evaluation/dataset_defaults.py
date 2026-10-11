@@ -44,8 +44,8 @@ def resolve_dataset_paths(
     """Resolve dataset corpus/queries paths intelligently.
     
     Logic:
-    1. If user provides explicit path, try to use it
-    2. If provided path doesn't exist, fall back to dataset default
+    1. If user provides an explicit path, use it (it must exist)
+    2. Otherwise use the dataset default
     3. Return (corpus_path, queries_path)
     
     Args:
@@ -58,17 +58,13 @@ def resolve_dataset_paths(
         (corpus_path, queries_path) - absolute or relative paths
     """
     default_corpus, default_queries = get_dataset_defaults(dataset)
-    
-    # Resolve corpus path
-    corpus_path = provided_corpus or default_corpus
-    corpus_full = Path(corpus_path) if Path(corpus_path).is_absolute() else workspace_root / corpus_path
-    if not corpus_full.exists():
-        corpus_path = default_corpus
-    
-    # Resolve queries path
-    queries_path = provided_queries or default_queries
-    queries_full = Path(queries_path) if Path(queries_path).is_absolute() else workspace_root / queries_path
-    if not queries_full.exists():
-        queries_path = default_queries
-    
-    return corpus_path, queries_path
+
+    # An explicitly provided path must exist: silently falling back to the default
+    # would evaluate a different corpus/query set than the one requested.
+    for provided in (provided_corpus, provided_queries):
+        if provided:
+            full = Path(provided) if Path(provided).is_absolute() else workspace_root / provided
+            if not full.exists():
+                raise FileNotFoundError(f"Dataset path not found: {provided}")
+
+    return provided_corpus or default_corpus, provided_queries or default_queries
