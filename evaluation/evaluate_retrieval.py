@@ -73,7 +73,12 @@ except Exception:
 
 
 def chunk_flat(text: str, contract_id: str, chunk_size: int = 300, overlap: int = 90) -> List[Document]:
-    """Flat chunking baseline aligned to token budget when possible."""
+    """Flat chunking baseline aligned to token budget when possible.
+
+    Each chunk cites the corpus unit it belongs to: section_num is the unit ID, so the
+    generator sees the same short source ID (e.g. 99_sec_99) as for an SPHR parent
+    instead of a placeholder (99_sec_N/A).
+    """
     if not text:
         return []
 
@@ -95,6 +100,7 @@ def chunk_flat(text: str, contract_id: str, chunk_size: int = 300, overlap: int 
                 metadata={
                     'chunk_type': 'flat',
                     'contract_id': contract_id,
+                    'section_num': contract_id,
                     'chunk_id': f"{contract_id}_flat_{chunk_idx}",
                     'token_count': len(token_slice)
                 }
@@ -116,6 +122,7 @@ def chunk_flat(text: str, contract_id: str, chunk_size: int = 300, overlap: int 
             metadata={
                 'chunk_type': 'flat',
                 'contract_id': contract_id,
+                'section_num': contract_id,
                 'chunk_id': f"{contract_id}_flat_{chunk_idx}",
                 'token_count': len(chunk_words)
             }
