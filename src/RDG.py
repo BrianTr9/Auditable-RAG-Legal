@@ -188,6 +188,16 @@ class StructuredOutput:
 # GRAMMAR & HELPERS
 # ==========================================
 
+def _gbnf_quoted_id(source_id: str) -> str:
+    """GBNF rule for one source ID emitted as a JSON string: '"\\"" "<escaped id>" "\\""'.
+
+    Escaping is done outside the f-string: a backslash inside an f-string expression is a
+    SyntaxError before Python 3.12, and the HPC environment runs Python 3.10.
+    """
+    escaped = source_id.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"\\"" "{escaped}" "\\""'
+
+
 class GBNFGrammarBuilder:
     def build_structured_cot_grammar(self, valid_citations: List[str], answer_mode: Literal["freeform", "yn"] = "freeform") -> str:
         """Constructs GBNF grammar for Structured CoT.
@@ -199,10 +209,10 @@ class GBNFGrammarBuilder:
         if not valid_citations:
             full_enum = short_enum = '"\"" "no_citation" "\""'
         else:
-            full_enum = ' | '.join([f'"\\"" "{c.replace("\\", "\\\\").replace('"', '\\"')}" "\\""' for c in valid_citations])
+            full_enum = ' | '.join([_gbnf_quoted_id(c) for c in valid_citations])
             # Short IDs for steps
             short_ids = [Citation.get_short_id_from_reference(c) for c in valid_citations]
-            short_enum = ' | '.join([f'"\\"" "{c.replace("\\", "\\\\").replace('"', '\\"')}" "\\""' for c in short_ids])
+            short_enum = ' | '.join([_gbnf_quoted_id(c) for c in short_ids])
 
         answer_rule = "string" if answer_mode == "freeform" else "yn-string"
         
@@ -348,6 +358,14 @@ def collect_validated_citations(
 # MAIN PIPELINE
 # ==========================================
 
+def _available_cpus() -> int:
+    """CPUs this process may run on: the job's allocation under Slurm, all cores elsewhere."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # not available on macOS
+        return os.cpu_count() or 1
+
+
 class RDGPipeline:
     def __init__(
         self,
@@ -365,6 +383,13 @@ class RDGPipeline:
         if not os.path.exists(self.model_path):
             raise RuntimeError(f"GGUF Model not found at {self.model_path}")
         
+        # llama-cpp's defaults (cpu_count()//2 and cpu_count()) count every core on the machine. Under Slurm
+        # that is the whole node, so dozens of threads would share the few CPUs the job was given.
+        # Keep the same rule, applied to the CPUs this process may actually use.
+        cpus = _available_cpus()
+        self.n_threads = max(1, cpus // 2)
+        self.n_threads_batch = cpus
+
         print(f"\n🔧 Loading RDG Model: {os.path.basename(self.model_path)}")
         try:
             old_stderr = sys.stderr
@@ -375,13 +400,15 @@ class RDGPipeline:
                 n_gpu_layers=n_gpu_layers,
                 verbose=verbose,
                 seed=self.seed,
+                n_threads=self.n_threads,
+                n_threads_batch=self.n_threads_batch,
             )
         finally:
             sys.stderr = old_stderr
-            
+
         self.grammar_builder = GBNFGrammarBuilder()
         self.extractor = ReferenceExtractor()
-        print(f"✓ Model Loaded (Ctx: {n_ctx}, Seed: {self.seed})")
+        print(f"✓ Model Loaded (Ctx: {n_ctx}, Seed: {self.seed}, Threads: {self.n_threads}/{self.n_threads_batch})")
 
     def _get_model_n_ctx(self) -> int:
         """Best-effort retrieval of active model context window size."""
@@ -502,7 +529,11 @@ Return a valid JSON object matching this schema:
             grammar_str = self.grammar_builder.build_structured_cot_grammar(valid_refs, answer_mode=answer_mode)
             grammar = LlamaGrammar.from_string(grammar_str)
         except Exception as e:
-            return StructuredOutput([], StructuredReasoning([]), f"Grammar Error: {e}")
+            # Report a failed output: without metadata the evaluator would count it as parsed JSON
+            # with zero citations, i.e. a free 0% fabrication.
+            message = f"Grammar Error: {e}"
+            return StructuredOutput([], StructuredReasoning([]), message,
+                                    metadata={"json_parse_success": 0, "raw_output_text": message})
 
         # 2. Build Context & Prompt
         context_parts = []
