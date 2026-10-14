@@ -106,6 +106,10 @@ def chunk_flat(text: str, contract_id: str, chunk_size: int = 300, overlap: int 
                 }
             ))
             chunk_idx += 1
+            # Stop once a window reaches the end of the text (as SPHR's child loop does): a further
+            # window would lie entirely inside this one and take a top-k slot as a duplicate.
+            if i + chunk_size >= len(tokens):
+                break
         return chunks
 
     # Fallback: word-based chunking if tokenizer is unavailable
@@ -128,6 +132,8 @@ def chunk_flat(text: str, contract_id: str, chunk_size: int = 300, overlap: int 
             }
         ))
         chunk_idx += 1
+        if i + chunk_size >= len(words):
+            break
     return chunks
 
 
