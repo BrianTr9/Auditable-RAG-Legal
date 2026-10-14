@@ -20,10 +20,11 @@ require_gpu_llama() {
   python -c "import llama_cpp, sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 'llama-cpp-python has no GPU support: rebuild it (workflow §3.6)')"
 }
 
-YEARS=(H18 H19 H20 H21 H22 H23 H24 H25 H26 H27 H28 H29 H30 R01 R02 R03 R04 R05 R06)
+# Years to run (array task i -> YEARS[i]). A smoke test may pass a subset, e.g. YEARS_LIST=R06 with --array=0.
+read -r -a YEARS <<< "${YEARS_LIST:-H18 H19 H20 H21 H22 H23 H24 H25 H26 H27 H28 H29 H30 R01 R02 R03 R04 R05 R06}"
 LLM=models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
 # Smoke test without touching the real results, e.g.:
-#   RESULTS=experiment_results/smoke EXTRA="--sample-queries 5" sbatch --qos=debug --time=00:30:00 --array=18 slurm_scripts/job_layer2_coliee.sh
+#   RESULTS=experiment_results/smoke EXTRA="--sample-queries 5" YEARS_LIST=R06 sbatch --qos=debug --time=00:30:00 --array=0 slurm_scripts/job_layer2_coliee.sh
 RESULTS=${RESULTS:-experiment_results}
 EXTRA=${EXTRA:-}
 
