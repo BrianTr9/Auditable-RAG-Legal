@@ -174,7 +174,9 @@ def gpt4o_generate(
     
     raw_text = response.choices[0].message.content.strip()
     output_dict = _parse_json_output(raw_text)
-    
+    # The "gpt-4o" alias moves between snapshots; record the snapshot that actually answered.
+    api_model = getattr(response, 'model', None)
+
     if not output_dict:
         return {
             'answer': raw_text,
@@ -183,6 +185,7 @@ def gpt4o_generate(
             'json_parse_success': 0,
             'raw_output_text': raw_text,
             'effective_max_tokens': None,
+            'api_model': api_model,
         }
     reasoning = StructuredReasoning.from_dict(output_dict.get('reasoning', {}))
     validated_citations = collect_validated_citations(output_dict, valid_refs_full, citation_mode=citation_mode)
@@ -194,6 +197,7 @@ def gpt4o_generate(
         'json_parse_success': 1,
         'raw_output_text': raw_text,
         'effective_max_tokens': None,
+        'api_model': api_model,
     }
 
 
@@ -272,181 +276,21 @@ def parse_max_tokens_arg(value: str) -> Optional[int]:
     return parsed
 
 
-def evaluate_generation(
-    mode: str,
-    corpus: Dict[str, Dict[str, str]],
-    queries: List[Dict[str, Any]],
-    llm_model_path: str,
-    n_ctx: int,
-    n_gpu_layers: int,
-    max_tokens: Optional[int],
-    citation_mode: Literal["short", "both"] = "short",
-    seed: int = 42,
-    sample_size: int = None,
-    dataset: str = "coliee",
-):
-    if sample_size:
-        queries = queries[:sample_size]
-        print(f"\n📊 Testing on {len(queries)} sample queries")
-    else:
-        print(f"\n📊 Evaluating on {len(queries)} queries")
+def summarize_generation(per_query_results: List[Dict[str, Any]], skipped_queries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate metrics from per-query entries (shared by evaluation and offline rescoring).
 
-    # Validate Layer 2 setup: retrieved should equal relevant_articles (GT context)
-    print(f"✓ Layer 2: Perfect retrieval (GT context isolation)")
+    Precision/recall are averaged over all queries (unparsable JSON scores 0);
+    hallucination is conditioned on successful JSON parsing.
+    """
+    hallucination_rates = [r['hallucination_rate'] for r in per_query_results if r['json_parse_success'] == 1]
+    citation_precisions = [r['citation_precision'] for r in per_query_results]
+    citation_recalls = [r['citation_recall'] for r in per_query_results]
+    answer_correctness = [r['answer_correct'] for r in per_query_results if r['answer_correct'] is not None]
+    generation_times = [r['generation_time'] for r in per_query_results]
+    hallucination_num_used = len(hallucination_rates)
+    precision_num_used = len(citation_precisions)
 
-    # Always initialize RDG context even for OpenAI to ensure 100% uniformity 
-    # of the prompting logic and reference extraction phase.
-    rdg = get_rdg_pipeline(model_path=llm_model_path, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, seed=seed)
-
-    per_query_results = []
-    hallucination_rates = []
-    citation_precisions = []
-    citation_recalls = []
-    answer_correctness = []
-    generation_times = []
-    hallucination_num_used = 0
-    precision_num_used = 0
-    raw_outputs = []
-    skipped_queries = []  # Track queries with missing corpus documents
-
-    for i, query_data in enumerate(queries, 1):
-        query_id = query_data['query_id']
-        question = query_data['question']
-        ground_truth = query_data['ground_truth_answer']
-        relevant_articles = query_data['relevant_articles']
-
-        print(f"\n[{i}/{len(queries)}] {query_id}")
-
-        # Build documents from GT (Layer 2: Perfect retrieval)
-        retrieved = sorted(set(relevant_articles))
-        assert len(retrieved) > 0, f"❌ Layer 2 BROKEN: Query {query_id} has no GT articles! Parser fix may have failed."
-        docs = build_documents_from_gt(corpus, retrieved)
-        
-        # Guard: Skip queries with missing corpus documents (e.g., CUAD Unicode mismatch)
-        if len(retrieved) > 0 and len(docs) == 0:
-            print(f"  ⚠️  SKIPPED: Query references {len(retrieved)} GT article(s) but none found in corpus.")
-            skipped_queries.append({
-                'query_id': query_id,
-                'reason': 'missing_corpus_documents',
-                'referenced_articles': retrieved,
-            })
-            continue
-
-        t_start = time.time()
-        if mode == "rdg":
-            structured = rdg.generate(question=question, documents=docs, max_tokens=max_tokens, answer_mode="yn")
-            answer = structured.answer
-            citations = extract_article_ids_from_citations(structured.citations)
-            json_parse_success = 1
-            if structured.metadata and 'json_parse_success' in structured.metadata:
-                json_parse_success = int(structured.metadata['json_parse_success'])
-            raw_output_text = answer
-            if structured.metadata and 'raw_output_text' in structured.metadata:
-                raw_output_text = str(structured.metadata['raw_output_text'])
-            effective_max_tokens = None
-            if structured.metadata and 'effective_max_tokens' in structured.metadata:
-                effective_max_tokens = int(structured.metadata['effective_max_tokens'])
-        elif mode == "prompt":
-            baseline = prompt_only_generate(
-                rdg,
-                question,
-                docs,
-                max_tokens=max_tokens,
-                temperature=0.0,
-                citation_mode=citation_mode,
-            )
-            answer = baseline['answer']
-            citations = extract_article_ids_from_citations(baseline['citations'])
-            json_parse_success = int(baseline.get('json_parse_success', 0))
-            raw_output_text = str(baseline.get('raw_output_text', answer))
-            effective_max_tokens = baseline.get('effective_max_tokens')
-        elif mode == "gpt4o":
-            baseline = gpt4o_generate(
-                rdg,
-                question,
-                docs,
-                model_name="gpt-4o",
-                temperature=0.0,
-                citation_mode=citation_mode,
-            )
-            answer = baseline['answer']
-            citations = extract_article_ids_from_citations(baseline['citations'])
-            json_parse_success = int(baseline.get('json_parse_success', 0))
-            raw_output_text = str(baseline.get('raw_output_text', answer))
-            effective_max_tokens = baseline.get('effective_max_tokens')
-
-        generation_time = time.time() - t_start
-
-        # Answer evaluation: only for datasets with Y/N binary answers (COLIEE, housing_qa)
-        # CUAD doesn't have binary answer labels, so skip answer-accuracy scoring for CUAD.
-        predicted_label = normalize_yn_answer(answer) if json_parse_success == 1 else None
-        is_correct = None
-        gt_label = None
-        
-        if dataset in ["coliee", "housing_qa"]:  # Datasets with binary Y/N answers
-            has_gt_answer = ground_truth is not None and str(ground_truth).strip() != ''
-            if has_gt_answer:
-                gt_label = normalize_yn_answer(str(ground_truth))
-                if gt_label is not None:
-                    is_correct = 1 if predicted_label == gt_label else 0
-        # For CUAD, is_correct remains None (not scored)
-
-        metrics = calculate_citation_metrics(citations, retrieved, relevant_articles)
-        
-        gt_print = gt_label if gt_label is not None else 'N/A'
-        status = '✓' if is_correct == 1 else ('✗' if is_correct == 0 else '-')
-        print(f"  Answer: {gt_print} → {predicted_label or '?'} {status}")
-        print(
-            f"  Hallucination: {metrics['citation_hallucination_rate']*100:.1f}% | "
-            f"Precision: {metrics['citation_precision']*100:.1f}% | "
-            f"Recall: {metrics['citation_recall']*100:.1f}%"
-        )
-        print(f"  Time: {generation_time:.2f}s")
-
-        # Query-level metrics: precision/recall are averaged over all queries.
-        # Hallucination is conditioned on successful JSON parsing.
-        if json_parse_success == 1:
-            hallucination_rates.append(metrics['citation_hallucination_rate'])
-            hallucination_num_used += 1
-
-        citation_precisions.append(metrics['citation_precision'])
-        precision_num_used += 1
-        citation_recalls.append(metrics['citation_recall'])
-        if is_correct is not None:
-            answer_correctness.append(is_correct)
-        generation_times.append(generation_time)
-
-        # Store result (minimal necessary fields)
-        result_entry = {
-            'query_id': query_id,
-            'ground_truth_answer': ground_truth,
-            'predicted_answer': predicted_label,
-            'answer_correct': is_correct,
-            'json_parse_success': json_parse_success,
-            'gt_citations': relevant_articles,
-            'llm_citations': citations,
-            'hallucination_rate': metrics['citation_hallucination_rate'],
-            'citation_precision': metrics['citation_precision'],
-            'citation_recall': metrics['citation_recall'],
-            'generation_time': generation_time
-        }
-        
-        # Include raw answer only if normalization changed it
-        if answer != predicted_label:
-            result_entry['raw_answer'] = answer
-
-        per_query_results.append(result_entry)
-        raw_outputs.append({
-            'query_id': query_id,
-            'mode': mode,
-            'json_parse_success': json_parse_success,
-            'ground_truth_answer': ground_truth,
-            'predicted_answer': predicted_label,
-            'raw_output_text': raw_output_text,
-            'effective_max_tokens': effective_max_tokens,
-        })
-
-    aggregate_metrics = {
+    return {
         'citation_hallucination_rate': {
             'mean': mean(hallucination_rates) if hallucination_rates else 0.0,
             'std': stdev(hallucination_rates) if len(hallucination_rates) > 1 else 0.0,
@@ -485,6 +329,175 @@ def evaluate_generation(
         }
     }
 
+
+def evaluate_generation(
+    mode: str,
+    corpus: Dict[str, Dict[str, str]],
+    queries: List[Dict[str, Any]],
+    llm_model_path: str,
+    n_ctx: int,
+    n_gpu_layers: int,
+    max_tokens: Optional[int],
+    citation_mode: Literal["short", "both"] = "short",
+    seed: int = 42,
+    sample_size: int = None,
+    dataset: str = "coliee",
+    openai_model: str = "gpt-4o",
+):
+    if sample_size:
+        queries = queries[:sample_size]
+        print(f"\n📊 Testing on {len(queries)} sample queries")
+    else:
+        print(f"\n📊 Evaluating on {len(queries)} queries")
+
+    # Validate Layer 2 setup: retrieved should equal relevant_articles (GT context)
+    print(f"✓ Layer 2: Perfect retrieval (GT context isolation)")
+
+    # Always initialize RDG context even for OpenAI to ensure 100% uniformity 
+    # of the prompting logic and reference extraction phase.
+    rdg = get_rdg_pipeline(model_path=llm_model_path, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, seed=seed)
+
+    per_query_results = []
+    raw_outputs = []
+    skipped_queries = []  # Track queries with missing corpus documents
+
+    for i, query_data in enumerate(queries, 1):
+        query_id = query_data['query_id']
+        question = query_data['question']
+        ground_truth = query_data['ground_truth_answer']
+        relevant_articles = query_data['relevant_articles']
+
+        print(f"\n[{i}/{len(queries)}] {query_id}")
+
+        # Build documents from GT (Layer 2: Perfect retrieval)
+        retrieved = sorted(set(relevant_articles))
+        # Guard: a query without GT articles has no ideal-retrieval context (e.g., 7 COLIEE pairs in H18-R06)
+        if not retrieved:
+            print(f"  ⚠️  SKIPPED: Query has no GT articles.")
+            skipped_queries.append({
+                'query_id': query_id,
+                'reason': 'no_gt_articles',
+                'referenced_articles': [],
+            })
+            continue
+        docs = build_documents_from_gt(corpus, retrieved)
+        
+        # Guard: Skip queries with missing corpus documents (e.g., CUAD Unicode mismatch)
+        if len(retrieved) > 0 and len(docs) == 0:
+            print(f"  ⚠️  SKIPPED: Query references {len(retrieved)} GT article(s) but none found in corpus.")
+            skipped_queries.append({
+                'query_id': query_id,
+                'reason': 'missing_corpus_documents',
+                'referenced_articles': retrieved,
+            })
+            continue
+
+        api_model = None
+        t_start = time.time()
+        if mode == "rdg":
+            structured = rdg.generate(question=question, documents=docs, max_tokens=max_tokens, answer_mode="yn")
+            answer = structured.answer
+            citations = extract_article_ids_from_citations(structured.citations)
+            json_parse_success = 1
+            if structured.metadata and 'json_parse_success' in structured.metadata:
+                json_parse_success = int(structured.metadata['json_parse_success'])
+            raw_output_text = answer
+            if structured.metadata and 'raw_output_text' in structured.metadata:
+                raw_output_text = str(structured.metadata['raw_output_text'])
+            effective_max_tokens = None
+            if structured.metadata and 'effective_max_tokens' in structured.metadata:
+                effective_max_tokens = int(structured.metadata['effective_max_tokens'])
+        elif mode == "prompt":
+            baseline = prompt_only_generate(
+                rdg,
+                question,
+                docs,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                citation_mode=citation_mode,
+            )
+            answer = baseline['answer']
+            citations = extract_article_ids_from_citations(baseline['citations'])
+            json_parse_success = int(baseline.get('json_parse_success', 0))
+            raw_output_text = str(baseline.get('raw_output_text', answer))
+            effective_max_tokens = baseline.get('effective_max_tokens')
+        elif mode == "gpt4o":
+            baseline = gpt4o_generate(
+                rdg,
+                question,
+                docs,
+                model_name=openai_model,
+                temperature=0.0,
+                citation_mode=citation_mode,
+            )
+            answer = baseline['answer']
+            citations = extract_article_ids_from_citations(baseline['citations'])
+            json_parse_success = int(baseline.get('json_parse_success', 0))
+            raw_output_text = str(baseline.get('raw_output_text', answer))
+            effective_max_tokens = baseline.get('effective_max_tokens')
+            api_model = baseline.get('api_model')
+
+        generation_time = time.time() - t_start
+
+        # Answer evaluation: only for datasets with Y/N binary answers (COLIEE, housing_qa)
+        # CUAD doesn't have binary answer labels, so skip answer-accuracy scoring for CUAD.
+        predicted_label = normalize_yn_answer(answer) if json_parse_success == 1 else None
+        is_correct = None
+        gt_label = None
+        
+        if dataset in ["coliee", "housing_qa"]:  # Datasets with binary Y/N answers
+            has_gt_answer = ground_truth is not None and str(ground_truth).strip() != ''
+            if has_gt_answer:
+                gt_label = normalize_yn_answer(str(ground_truth))
+                if gt_label is not None:
+                    is_correct = 1 if predicted_label == gt_label else 0
+        # For CUAD, is_correct remains None (not scored)
+
+        metrics = calculate_citation_metrics(citations, retrieved, relevant_articles)
+        
+        gt_print = gt_label if gt_label is not None else 'N/A'
+        status = '✓' if is_correct == 1 else ('✗' if is_correct == 0 else '-')
+        print(f"  Answer: {gt_print} → {predicted_label or '?'} {status}")
+        print(
+            f"  Hallucination: {metrics['citation_hallucination_rate']*100:.1f}% | "
+            f"Precision: {metrics['citation_precision']*100:.1f}% | "
+            f"Recall: {metrics['citation_recall']*100:.1f}%"
+        )
+        print(f"  Time: {generation_time:.2f}s")
+
+        # Store result (minimal necessary fields)
+        result_entry = {
+            'query_id': query_id,
+            'ground_truth_answer': ground_truth,
+            'predicted_answer': predicted_label,
+            'answer_correct': is_correct,
+            'json_parse_success': json_parse_success,
+            'gt_citations': relevant_articles,
+            'llm_citations': citations,
+            'hallucination_rate': metrics['citation_hallucination_rate'],
+            'citation_precision': metrics['citation_precision'],
+            'citation_recall': metrics['citation_recall'],
+            'generation_time': generation_time
+        }
+        
+        # Include raw answer only if normalization changed it
+        if answer != predicted_label:
+            result_entry['raw_answer'] = answer
+
+        per_query_results.append(result_entry)
+        raw_outputs.append({
+            'query_id': query_id,
+            'mode': mode,
+            'json_parse_success': json_parse_success,
+            'ground_truth_answer': ground_truth,
+            'predicted_answer': predicted_label,
+            'raw_output_text': raw_output_text,
+            'effective_max_tokens': effective_max_tokens,
+            **({'api_model': api_model} if api_model else {}),
+        })
+
+    aggregate_metrics = summarize_generation(per_query_results, skipped_queries)
+
     return aggregate_metrics, per_query_results, raw_outputs
 
 
@@ -503,6 +516,8 @@ def main():
                         help="Generation token cap. Use an integer, or 'auto' to use each model's max available tokens per prompt.")
     parser.add_argument('--citation-mode', type=str, default='short', choices=['short', 'both'],
                         help="Citation parser mode. Applies only to --mode prompt: 'short' accepts doc_x_sec_y only; 'both' also accepts full-form refs. Ignored in --mode rdg.")
+    parser.add_argument('--openai-model', type=str, default='gpt-4o',
+                        help="OpenAI model for --mode gpt4o. Pin a dated snapshot for reported runs: the bare alias can move between snapshots.")
     parser.add_argument('--sample-queries', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output', type=str, default='')
@@ -543,7 +558,8 @@ def main():
         citation_mode=args.citation_mode,
         seed=args.seed,
         sample_size=None,
-        dataset=args.dataset
+        dataset=args.dataset,
+        openai_model=args.openai_model,
     )
 
     output = {
@@ -559,6 +575,7 @@ def main():
             'max_tokens_mode': 'auto' if max_tokens is None else 'fixed',
             'n_ctx': args.n_ctx,
             'seed': args.seed,
+            **({'openai_model_requested': args.openai_model} if args.mode == 'gpt4o' else {}),
         },
         'aggregate_metrics': aggregate_metrics,
         'per_query_results': per_query_results
