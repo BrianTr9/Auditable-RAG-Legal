@@ -7,14 +7,14 @@ Runs locally on the JSON outputs only (no model, no index).
 Usage:
     # Layer 2, ideal retrieval (Table 2): per-year dirs written by slurm_scripts/job_layer2_*.sh
     python3 evaluation/aggregate_coliee.py layer2 experiment_results/coliee_layer2 \
-        --compare experiment_results_coliee --out experiment_results/coliee_layer2/SUMMARY.md
+        --compare experiment_results_generation --out experiment_results/coliee_layer2/SUMMARY.md
 
     # Layer 1, retrieval: per-year dirs written by slurm_scripts/job_layer1_coliee.sh
     python3 evaluation/aggregate_coliee.py layer1 experiment_results/coliee_layer1 \
         --out experiment_results/coliee_layer1/SUMMARY.md
 
 ROOT is either a directory of per-year subdirectories (H18/, ..., R06/) or a single flat
-directory holding the result files (e.g. the 2026-05 R06 run in experiment_results_coliee/).
+directory holding the result files (e.g. the 2026-05 R06 run in experiment_results_generation/).
 
 Reported subsets:
     all      every loaded query with at least one GT article

@@ -3,11 +3,15 @@
 
 # ~/.bashrc and conda's activate scripts touch unset variables, so `set -u` comes after them.
 source ~/.bashrc                                    # AURAG_DIR, HF_HOME, PIP_CACHE_DIR (§3.4)
-module load cuda miniforge                          # check exact module names with `module avail`
-source "$ROOTMINIFORGE/etc/profile.d/conda.sh"      # variable name per `module show miniforge`
+module load miniforge
+# CUDA modules exist only on GPU nodes; L1 and GPT-4o run on CPU nodes (partition general).
+if [[ -n ${CUDA_VISIBLE_DEVICES:-} ]]; then module load cuda; fi
+source "$ROOTMINIFORGE/etc/profile.d/conda.sh"      # as in RCC's conda guide
 conda activate aurag
 set -u
 cd "${AURAG_DIR:-$SLURM_SUBMIT_DIR}"
+# CPU libraries (torch, BLAS) would otherwise size their thread pools to the whole node.
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1} MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 
 # tiktoken caches its encoding in $TMPDIR by default, which Bunya creates per job and deletes at the end,
 # so every job would download it again. Keep it in the cache filled once during setup (workflow §3.7).
@@ -32,7 +36,8 @@ EXTRA=${EXTRA:-}
 prov() {
   mkdir -p "$1"
   { echo "job=${SLURM_JOB_ID:-} array_task=${SLURM_ARRAY_TASK_ID:-}"; git rev-parse HEAD; { git status --porcelain | head -20 || true; }
-    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader; date -u; } > "$1/RUN_INFO.txt"
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo "no GPU (CPU job on $(hostname))"
+    date -u; } > "$1/RUN_INFO.txt"
   pip freeze > "$1/pip_freeze.txt"
 }
 

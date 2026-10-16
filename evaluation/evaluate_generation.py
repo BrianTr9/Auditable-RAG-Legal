@@ -82,6 +82,7 @@ from RDG import (
     collect_validated_citations,
     ReferenceExtractor,
     RDGPipeline,
+    PromptBuilder,
 )
 
 
@@ -353,9 +354,12 @@ def evaluate_generation(
     # Validate Layer 2 setup: retrieved should equal relevant_articles (GT context)
     print(f"✓ Layer 2: Perfect retrieval (GT context isolation)")
 
-    # Always initialize RDG context even for OpenAI to ensure 100% uniformity 
-    # of the prompting logic and reference extraction phase.
-    rdg = get_rdg_pipeline(model_path=llm_model_path, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, seed=seed)
+    # Every mode uses the same prompt and reference construction. GPT-4o gets it from PromptBuilder,
+    # which shares RDGPipeline._build_prompt, so the local model is loaded only for the 8B modes.
+    if mode == "gpt4o":
+        rdg = PromptBuilder()
+    else:
+        rdg = get_rdg_pipeline(model_path=llm_model_path, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, seed=seed)
 
     per_query_results = []
     raw_outputs = []

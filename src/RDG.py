@@ -43,7 +43,7 @@ __all__ = [
 try:
     from llama_cpp import Llama, LlamaGrammar
     LLAMA_CPP_AVAILABLE = True
-except ImportError:
+except Exception:  # not installed, or a CUDA build imported on a CPU node (no driver library)
     LLAMA_CPP_AVAILABLE = False
     Llama = None
     LlamaGrammar = None
@@ -588,6 +588,19 @@ Return a valid JSON object matching this schema:
                 "effective_max_tokens": effective_max_tokens,
             },
         )
+
+
+class PromptBuilder:
+    """RDGPipeline's prompt and reference construction without loading a model.
+
+    For API baselines (GPT-4o): the prompt comes from the very same `_build_prompt` function,
+    so it is identical to the one the local model receives, but no GPU or GGUF file is needed.
+    """
+
+    def __init__(self):
+        self.extractor = ReferenceExtractor()
+
+    _build_prompt = RDGPipeline._build_prompt
 
 # ==========================================
 # SINGLETON EXPORT

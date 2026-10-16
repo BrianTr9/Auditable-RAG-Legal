@@ -16,7 +16,7 @@
 # same settings as notebook cell 4. Layer 2 builds no index, so tasks can run in parallel.
 # Every year, R06 included, is re-run on the same GPU type so latencies are comparable.
 # Queries without GT articles (H29-28-E and six in R04) are skipped by evaluate_generation.py.
-# Aggregate on the Mac: python3 evaluation/aggregate_coliee.py layer2 experiment_results/coliee_layer2 --compare experiment_results_coliee
+# Aggregate on the Mac: python3 evaluation/aggregate_coliee.py layer2 experiment_results/coliee_layer2 --compare experiment_results_generation
 set -eo pipefail
 source "${SLURM_SUBMIT_DIR:?submit from the repo root: cd $AURAG_DIR && sbatch slurm_scripts/<job>.sh}/slurm_scripts/_common.sh"
 
