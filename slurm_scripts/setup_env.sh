@@ -11,6 +11,11 @@ set -eo pipefail
 MODE=${1:-gpu}
 cd "$(dirname "$0")/.."
 
+# Diagnostics first, so a failure is easy to place in the log.
+echo "setup_env.sh mode=$MODE host=$(hostname) date=$(date -u) gpus=${CUDA_VISIBLE_DEVICES:-none}"
+echo "internet (HTTP code from huggingface.co): $(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' https://huggingface.co 2>&1 || true)"
+set -x   # echo every command from here on
+
 module load miniforge
 if [[ $MODE == gpu ]]; then module load cuda; fi
 source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
