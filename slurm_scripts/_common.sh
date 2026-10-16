@@ -2,7 +2,7 @@
 # See z_docs/BunyaHPC/BUNYA_AURAG_EXPERIMENT_WORKFLOW.md §3 for the one-time install.
 
 # ~/.bashrc and conda's activate scripts touch unset variables, so `set -u` comes after them.
-source ~/.bashrc                                    # AURAG_DIR, HF_HOME, PIP_CACHE_DIR (§3.4)
+source ~/.bashrc                                    # optional AURAG_DIR / HF_HOME; both fall back to defaults
 source "$(dirname "${BASH_SOURCE[0]}")/_modules.sh"
 load_module miniforge
 # CUDA modules exist only on GPU nodes; L1 and GPT-4o run on CPU nodes (partition general).
@@ -15,14 +15,14 @@ cd "${AURAG_DIR:-$SLURM_SUBMIT_DIR}"
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1} MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 
 # tiktoken caches its encoding in $TMPDIR by default, which Bunya creates per job and deletes at the end,
-# so every job would download it again. Keep it in the cache filled once during setup (workflow §3.7).
+# so every job would download it again. Keep it in the cache filled once during setup (setup_env.sh).
 export TIKTOKEN_CACHE_DIR=${TIKTOKEN_CACHE_DIR:-/scratch/user/$USER/.cache/tiktoken}
 # Do NOT set HF_HUB_OFFLINE=1: transformers 4.57.x queries the Hub API (model_info) while loading a tokenizer
 # by repo name and raises in offline mode even when the files are cached.
 
-# Fail fast if llama-cpp-python was built without CUDA: it would silently decode on the CPU (workflow §3.6).
+# Fail fast if llama-cpp-python was built without CUDA: it would silently decode on the CPU (setup_env.sh gpu mode builds it with CUDA).
 require_gpu_llama() {
-  python -c "import llama_cpp, sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 'llama-cpp-python has no GPU support: rebuild it (workflow §3.6)')"
+  python -c "import llama_cpp, sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 'llama-cpp-python has no GPU support: rebuild it (setup_env.sh, gpu mode)')"
 }
 
 # Years to run (array task i -> YEARS[i]). A smoke test may pass a subset, e.g. YEARS_LIST=R06 with --array=0.

@@ -20,7 +20,10 @@ source slurm_scripts/_modules.sh
 load_module miniforge
 if [[ $MODE == gpu ]]; then load_module cuda; fi
 source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
-conda env list | grep -q "^aurag " || conda create -n aurag python=3.10 -y
+# Match against a variable, not a pipe: under pipefail an early-exiting `grep -q` can SIGPIPE `conda env list`,
+# the pipeline then reports failure and `conda create -y` would be run on the existing env.
+ENVS=$(conda env list)
+grep -q "^aurag " <<< "$ENVS" || conda create -n aurag python=3.10 -y
 conda activate aurag
 
 export PIP_CACHE_DIR=/scratch/user/$USER/.cache/pip

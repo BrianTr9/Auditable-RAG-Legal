@@ -21,7 +21,18 @@ set -eo pipefail
 cd "${SLURM_SUBMIT_DIR:?submit from the repo root}"
 
 bash --login slurm_scripts/setup_env.sh
+
+# One failing year must not stop the others: a resubmit would queue for a GPU again (days).
+# Failed years are listed at the end (task i = i-th year of YEARS in _common.sh) and the job exits non-zero.
+FAILED=()
 for i in $(seq 0 18); do
-  SLURM_ARRAY_TASK_ID=$i bash --login slurm_scripts/job_layer2_coliee.sh
+  if ! SLURM_ARRAY_TASK_ID=$i bash --login slurm_scripts/job_layer2_coliee.sh; then
+    echo "LAYER 2 FAILED for task $i, continuing with the next year" >&2
+    FAILED+=("$i")
+  fi
 done
+if (( ${#FAILED[@]} > 0 )); then
+  echo "LAYER 2 INCOMPLETE: failed tasks: ${FAILED[*]}. Fix, then submit this job again (finished outputs are skipped)." >&2
+  exit 1
+fi
 echo "LAYER 2 DONE: experiment_results/coliee_layer2/"

@@ -9,6 +9,8 @@
 set -eo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p logs
+# The GPT-4o array needs this key; without it all 19 tasks would fail after the setup job has already run.
+[[ -s ~/.aurag_openai ]] || { echo "Missing ~/.aurag_openai (OpenAI key file). Create it first, see workflow doc section 3." >&2; exit 1; }
 
 SETUP=$(sbatch --parsable --job-name=aurag_setup_cpu --account=a_eecs_ds --partition=general --qos=normal \
   --constraint=epyc3 --cpus-per-task=8 --mem=32G --time=02:00:00 --output=logs/%x_%j.out \

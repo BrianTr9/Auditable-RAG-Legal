@@ -8,10 +8,10 @@ cd "$(dirname "$0")/.."
 
 if [[ ${1:-} == report ]]; then
   R=experiment_results/smoke
-  echo "== setup logs";          tail -n 2 ../logs/aurag_setup*.out 2>/dev/null
+  echo "== setup logs";          tail -n 2 logs/aurag_setup*.out 2>/dev/null
   echo "== output files";        find $R -name '*.json' 2>/dev/null | sort
   echo "== stderr tails";        tail -n 3 logs/AuRAG_*.err 2>/dev/null
-  echo "== llama.cpp threads";   grep -h "Threads:" logs/AuRAG_L2*.out ../logs/aurag_setup*.out 2>/dev/null | sort -u
+  echo "== llama.cpp threads";   grep -h "Threads:" logs/AuRAG_L2*.out logs/aurag_setup*.out 2>/dev/null | sort -u
   echo "== GPT-4o snapshot";     grep -ho '"api_model": "[^"]*"' $R/coliee_layer2/R06/layer2_generation_gpt4o_short_raw_outputs.json 2>/dev/null | sort | uniq -c
   exit 0
 fi

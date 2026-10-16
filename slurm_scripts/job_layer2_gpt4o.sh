@@ -11,13 +11,16 @@
 #SBATCH --array=0-18%4
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
-# GPT-4o baseline (API JSON mode), one array task per year, same settings as notebook cell 4.
+# GPT-4o baseline (API JSON mode), one array task per year, same settings as notebook cell 6.
 # CPU only: the prompt comes from PromptBuilder (same function as the 8B runs), no local model is loaded.
 # Needs outbound internet from the compute node.
 set -eo pipefail
 source "${SLURM_SUBMIT_DIR:?submit from the repo root: cd $AURAG_DIR && sbatch slurm_scripts/<job>.sh}/slurm_scripts/_common.sh"
 
-export OPENAI_API_KEY=$(cat ~/.aurag_openai)       # §3.9; never commit the key
+# `export V=$(cat f)` would hide a missing file (export returns 0), so test first. Never commit the key.
+[[ -s ~/.aurag_openai ]] || { echo "~/.aurag_openai is missing or empty (see workflow doc section 3)" >&2; exit 1; }
+OPENAI_API_KEY=$(cat ~/.aurag_openai)
+export OPENAI_API_KEY
 # Every year must hit the same snapshot. The bare alias "gpt-4o" answered as gpt-4o-2024-08-06 on 2026-10-16.
 OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-2024-08-06}
 YEAR=${YEARS[$SLURM_ARRAY_TASK_ID]}

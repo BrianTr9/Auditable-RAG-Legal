@@ -10,7 +10,7 @@
 #SBATCH --time=06:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-# Layer 1 retrieval on COLIEE, one query file per year (H18-R06), same settings as notebook cell 3.
+# Layer 1 retrieval on COLIEE, one query file per year (H18-R06), same settings as notebook cell 4.
 # Runs on CPU: 800 short articles and e5-small need no GPU (GPUs on Bunya are heavily queued).
 # Systems run sequentially in ONE job: every SPHR run rebuilds evaluation/vector_db_sphr and every
 # flat run rebuilds evaluation/vector_db_flat, so two Layer-1 jobs at once would corrupt each other.
