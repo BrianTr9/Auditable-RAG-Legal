@@ -3,7 +3,7 @@
 #SBATCH --account=a_eecs_ds
 #SBATCH --partition=gpu_cuda
 #SBATCH --qos=gpu
-#SBATCH --gres=gpu:l40:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
