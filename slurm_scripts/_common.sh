@@ -44,9 +44,12 @@ prov() {
 
 # ---- result stamps: never reuse results made by different code or settings --------------------------------
 # Fingerprint of everything that can change a number: Python sources, the COLIEE corpus and query files.
-# Slurm scripts, docs and tests are left out, so editing them does not invalidate finished results.
+# Left out because they never produce a number: Slurm scripts, docs, tests, aggregate_coliee.py (it only reads the
+# result JSON, on the Mac) and evaluation/systems/ (end-to-end only). Editing them must not invalidate finished results.
+# Anything else under src/ and evaluation/ counts, so a new file is covered by default.
 code_fingerprint() {
-  { find src evaluation -name '*.py' -not -path '*/__pycache__/*'; ls benchmark/COLIEE/civil.xml benchmark/COLIEE/simple/*.xml; } \
+  { find src evaluation -name '*.py' -not -path '*/__pycache__/*' -not -path 'evaluation/systems/*' -not -name 'aggregate_coliee.py'
+    ls benchmark/COLIEE/civil.xml benchmark/COLIEE/simple/*.xml; } \
     | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1
 }
 
