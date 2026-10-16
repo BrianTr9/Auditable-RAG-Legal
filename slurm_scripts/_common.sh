@@ -3,9 +3,10 @@
 
 # ~/.bashrc and conda's activate scripts touch unset variables, so `set -u` comes after them.
 source ~/.bashrc                                    # AURAG_DIR, HF_HOME, PIP_CACHE_DIR (§3.4)
-module load miniforge
+source "$(dirname "${BASH_SOURCE[0]}")/_modules.sh"
+load_module miniforge
 # CUDA modules exist only on GPU nodes; L1 and GPT-4o run on CPU nodes (partition general).
-if [[ -n ${CUDA_VISIBLE_DEVICES:-} ]]; then module load cuda; fi
+if [[ -n ${CUDA_VISIBLE_DEVICES:-} ]]; then load_module cuda; fi
 source "$ROOTMINIFORGE/etc/profile.d/conda.sh"      # as in RCC's conda guide
 conda activate aurag
 set -u

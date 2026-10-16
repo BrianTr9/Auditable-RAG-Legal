@@ -16,8 +16,9 @@ echo "setup_env.sh mode=$MODE host=$(hostname) date=$(date -u) gpus=${CUDA_VISIB
 echo "internet (HTTP code from huggingface.co): $(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' https://huggingface.co 2>&1 || true)"
 set -x   # echo every command from here on
 
-module load miniforge
-if [[ $MODE == gpu ]]; then module load cuda; fi
+source slurm_scripts/_modules.sh
+load_module miniforge
+if [[ $MODE == gpu ]]; then load_module cuda; fi
 source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
 conda env list | grep -q "^aurag " || conda create -n aurag python=3.10 -y
 conda activate aurag
