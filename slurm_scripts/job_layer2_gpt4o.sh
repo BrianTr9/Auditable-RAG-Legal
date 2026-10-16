@@ -26,6 +26,8 @@ OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-2024-08-06}
 YEAR=${YEARS[$SLURM_ARRAY_TASK_ID]}
 OUT=$RESULTS/coliee_layer2/$YEAR
 mkdir -p "$OUT"
+stamp_results "$RESULTS/coliee_layer2" l2_gpt4o "--dataset coliee --seed 42 $EXTRA|gpt4o|$OPENAI_MODEL|short" \
+  '*/layer2_generation_gpt4o_short*.json'
 
 run_if_missing "$OUT/layer2_generation_gpt4o_short.json" \
   python evaluation/evaluate_generation.py --dataset coliee --queries "benchmark/COLIEE/simple/simple_${YEAR}_jp.xml" \

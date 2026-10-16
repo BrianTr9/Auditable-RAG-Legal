@@ -38,13 +38,59 @@ prov() {
   mkdir -p "$1"
   { echo "job=${SLURM_JOB_ID:-} array_task=${SLURM_ARRAY_TASK_ID:-}"; git rev-parse HEAD; { git status --porcelain | head -20 || true; }
     nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo "no GPU (CPU job on $(hostname))"
-    date -u; } > "$1/RUN_INFO.txt"
+    date -u; echo "---"; } >> "$1/RUN_INFO.txt"   # appended: one block per job, so earlier runs stay on record
   pip freeze > "$1/pip_freeze.txt"
+}
+
+# ---- result stamps: never reuse results made by different code or settings --------------------------------
+# Fingerprint of everything that can change a number: Python sources, the COLIEE corpus and query files.
+# Slurm scripts, docs and tests are left out, so editing them does not invalidate finished results.
+code_fingerprint() {
+  { find src evaluation -name '*.py' -not -path '*/__pycache__/*'; ls benchmark/COLIEE/civil.xml benchmark/COLIEE/simple/*.xml; } \
+    | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1
+}
+
+# stamp_results <root> <label> <settings> <glob relative to root>...
+# Call once per job, before any run_if_missing. The stamp (hash of code and settings) is kept in <root>/.stamp_<label>:
+#   - same stamp: finished results are reused;
+#   - different stamp: this label's old results move to <root>/../_stale/<label>/<UTC time>_<old stamp>/ (kept, never
+#     deleted) and are recomputed, so a table never mixes code versions;
+#   - no stamp but results exist (made before stamps): adopted under the current stamp, with a warning.
+# Safe for parallel array tasks (flock); each label only touches its own files.
+stamp_results() {
+  local root=$1 label=$2 settings=$3; shift 3
+  CODE_FP=$(code_fingerprint)
+  local stamp
+  stamp=$(printf '%s\n%s\n' "$settings" "$CODE_FP" | sha256sum | cut -d' ' -f1)
+  mkdir -p "$root"
+  (
+    flock 9
+    cd "$root"
+    shopt -s nullglob
+    local files=() pat f old="" dest
+    for pat in "$@"; do for f in $pat; do [[ -f $f ]] && files+=("$f"); done; done
+    if [[ -s .stamp_$label ]]; then old=$(<".stamp_$label"); fi
+    if [[ -n $old && $old != "$stamp" && ${#files[@]} -gt 0 ]]; then
+      dest="$(cd .. && pwd)/_stale/$label/$(date -u +%Y%m%dT%H%M%SZ)_${old:0:8}"
+      echo "STAMP $label: code or settings changed since these results were made; moving ${#files[@]} old files to $dest"
+      for f in "${files[@]}"; do mkdir -p "$dest/$(dirname "$f")"; mv "$f" "$dest/$f"; done
+    elif [[ -z $old && ${#files[@]} -gt 0 ]]; then
+      echo "STAMP $label: ${#files[@]} result files have no stamp (made before stamps existed); adopting them for the current code and settings"
+    fi
+    echo "$stamp" > ".stamp_$label"
+  ) 9>"$root/.stamp_$label.lock"
+  echo "stamp $label: ${stamp:0:12}"
 }
 
 # run_if_missing <output file> <command...>: skip work a previous attempt already finished,
 # so a failed or timed-out job can simply be resubmitted. Outputs are written only at the end of a run.
+# After stamp_results it also stops the job if the code changed since the stamp (e.g. a `git pull` mid-job), because
+# the remaining years would otherwise run on different code than the finished ones.
 run_if_missing() {
   local out=$1; shift
+  if [[ -n ${CODE_FP:-} && $(code_fingerprint) != "$CODE_FP" ]]; then
+    echo "ERROR: src/, evaluation/ or the COLIEE data changed while this job was running; resubmit it." >&2
+    exit 1
+  fi
   if [[ -s $out ]]; then echo "skip (exists): $out"; else "$@"; fi
 }

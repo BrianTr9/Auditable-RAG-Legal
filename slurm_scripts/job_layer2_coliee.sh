@@ -25,7 +25,10 @@ YEAR=${YEARS[$SLURM_ARRAY_TASK_ID]}
 echo "== Layer 2, year $YEAR (task $SLURM_ARRAY_TASK_ID)"
 OUT=$RESULTS/coliee_layer2/$YEAR
 prov "$OUT"
-GEN="--dataset coliee --queries benchmark/COLIEE/simple/simple_${YEAR}_jp.xml --llm-model $LLM --n-ctx 16384 --max-tokens 2048 --seed 42 $EXTRA"
+GEN_CFG="--dataset coliee --llm-model $LLM --n-ctx 16384 --max-tokens 2048 --seed 42 $EXTRA"
+GEN="$GEN_CFG --queries benchmark/COLIEE/simple/simple_${YEAR}_jp.xml"
+stamp_results "$RESULTS/coliee_layer2" l2_8b "$GEN_CFG|rdg|prompt:short|rescore:both" \
+  '*/layer2_generation_rdg*.json' '*/layer2_generation_prompt_*.json'
 
 run_if_missing "$OUT/layer2_generation_rdg.json" \
   python evaluation/evaluate_generation.py $GEN --mode rdg --output "$OUT/layer2_generation_rdg.json"

@@ -21,6 +21,7 @@ source "${SLURM_SUBMIT_DIR:?submit from the repo root: cd $AURAG_DIR && sbatch s
 ROOT=$RESULTS/coliee_layer1
 prov "$ROOT"
 COMMON="--dataset coliee --top-k 3,5,10 --retrieval-mode hybrid --bm25-weight 0.5 --rrf-k 60 --device cpu --seed 42 $EXTRA"
+stamp_results "$ROOT" l1 "$COMMON|sphr:workers3,chunk16|flat:300/90|flat:512/150" '*/layer1_retrieval_*.json'
 
 for YEAR in "${YEARS[@]}"; do
   OUT=$ROOT/$YEAR/layer1_retrieval; mkdir -p "$ROOT/$YEAR"
