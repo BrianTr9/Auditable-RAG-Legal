@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash --login
 #SBATCH --job-name=AuRAG_L2_COLIEE
 #SBATCH --account=a_eecs_ds
 #SBATCH --partition=gpu_cuda
