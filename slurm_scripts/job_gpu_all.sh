@@ -19,6 +19,9 @@
 # Estimate: ~6 h on one A100 (1216 queries x ~14 s, plus model loads and the CUDA build).
 set -eo pipefail
 cd "${SLURM_SUBMIT_DIR:?submit from the repo root}"
+# sbatch exports the submitting shell's environment. This job is always the real run, so a RESULTS, EXTRA or YEARS_LIST
+# left over there (they select the smoke run) must not leak in; setup_env.sh sets them explicitly for its own smoke test.
+unset RESULTS EXTRA YEARS_LIST
 
 bash --login slurm_scripts/setup_env.sh
 

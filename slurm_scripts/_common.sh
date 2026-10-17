@@ -9,6 +9,15 @@ load_module miniforge
 if [[ -n ${CUDA_VISIBLE_DEVICES:-} ]]; then load_module cuda; fi
 source "$ROOTMINIFORGE/etc/profile.d/conda.sh"      # as in RCC's conda guide
 conda activate aurag
+# A nested script (the smoke test that setup_env.sh starts with `bash --login`) inherits an already active env.
+# `conda activate` of the active env leaves PATH untouched, and the module loads above can put the base miniforge
+# python in front of it, so `python` would miss every package installed in `aurag`. Put the env first explicitly.
+export PATH="${CONDA_PREFIX:?conda activate aurag failed}/bin:$PATH"
+hash -r
+if [[ $(command -v python) != "$CONDA_PREFIX/bin/python" ]]; then
+  echo "ERROR: python is $(command -v python), expected $CONDA_PREFIX/bin/python (is the aurag env complete?)" >&2
+  exit 1
+fi
 set -u
 cd "${AURAG_DIR:-$SLURM_SUBMIT_DIR}"
 # CPU libraries (torch, BLAS) would otherwise size their thread pools to the whole node.
