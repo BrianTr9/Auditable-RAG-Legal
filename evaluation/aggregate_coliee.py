@@ -26,6 +26,18 @@ Statistics (reference system: RDG for Layer 2, SPHR for Layer 1):
     - binary per-query outcomes (answer correct, any fabricated ID): exact McNemar test
     - Bonferroni within each (metric, subset) family over the comparisons made
     - 95% percentile bootstrap CIs for Layer-2 means
+Further subsets, added after the 2026-10 re-run: H18-R05 (everything except R06, which was also used while the
+prompt and the scoring were developed) and H18-R01 (exams before the reform took effect).
+
+Extra report sections (after the per-subset tables, so the per-subset layout is unchanged):
+    Layer 2: answer behaviour against the majority-class baseline (per-class recall, balanced accuracy), citation
+             recall by number of gold articles, composition of the invalid IDs of the prompt-only runs, and a
+             cluster bootstrap over exam questions for the headline contrasts.
+    Layer 1: precision and NDCG under the standard definitions (P@k = hits / k, ideal DCG over min(|gold|, k)) and a
+             cluster bootstrap of SPHR minus each flat baseline.
+The 1216 statements come from 407 exam questions (up to five statements share one question and its gold articles),
+so the bootstrap resamples whole questions; the naive per-statement interval is printed next to it.
+
 Hallucination follows evaluate_generation.py: per-query |C \\ R| / |C| over outputs with
 parsable JSON (macro). The pooled rate sum|C \\ R| / sum|C| and the number of parsable outputs
 with no citation at all are reported next to it, because an empty C scores 0 in the macro mean.
@@ -34,7 +46,10 @@ with no citation at all are reported next to it, because an empty C scores 0 in 
 from __future__ import annotations
 
 import argparse
+import binascii
 import json
+import math
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -58,6 +73,8 @@ SUBSETS = {
     'all': None,
     'R02-R06': {'R02', 'R03', 'R04', 'R05', 'R06'},
     'R06': {'R06'},
+    'H18-R05': {f'H{n}' for n in range(18, 31)} | {'R01', 'R02', 'R03', 'R04', 'R05'},   # R06 held out
+    'H18-R01': {f'H{n}' for n in range(18, 31)} | {'R01'},                                # before the reform
 }
 N_BOOTSTRAP = 10000
 BOOTSTRAP_SEED = 42
@@ -68,7 +85,15 @@ BOOTSTRAP_SEED = 42
 # ---------------------------------------------------------------------------
 
 def year_of(query_id: str) -> str:
-    return query_id.split('-', 1)[0]
+    """Exam year of a query id, normalised: simple_R01_jp.xml mixes the prefixes 'R01-' and 'R1-'."""
+    head = query_id.split('-', 1)[0]
+    m = re.fullmatch(r'([HR])0*(\d+)', head)
+    return f'{m.group(1)}{int(m.group(2)):02d}' if m else head
+
+
+def question_of(query_id: str) -> str:
+    """Exam question a statement belongs to (statements A/E/I/O/U of one question share their gold articles)."""
+    return f'{year_of(query_id)}-{query_id.split("-")[1]}' if query_id.count('-') >= 2 else query_id
 
 
 def result_files(root: Path, filename: str) -> List[Path]:
@@ -142,6 +167,29 @@ def marker_for(p_bonf: float) -> str:
 # Layer 2
 # ---------------------------------------------------------------------------
 
+INVALID_PREFIX = '__INVALID__::'
+
+
+def decode_invalid(token: str) -> str:
+    """evaluate_generation keeps an invalid citation as '__INVALID__::<hex of the text>'; return the text."""
+    try:
+        return binascii.unhexlify(token[len(INVALID_PREFIX):]).decode('utf-8', 'replace')
+    except (binascii.Error, ValueError):
+        return token
+
+
+def invalid_kind(text: str) -> str:
+    if text == '__EMPTY_CITATION__':
+        return 'empty citation'
+    if text.startswith('doc_'):
+        return 'copy of the prompt example (doc_N...)'
+    if '_Section_' in text and ('[' in text or ' ' in text):
+        return 'full form with extra text'
+    if '_Section_' in text:
+        return 'full form of a real article'
+    return 'other'
+
+
 def layer2_query_view(rec: dict) -> dict:
     """Per-query quantities, with the stored hallucination rate re-derived as a consistency check."""
     cited = set(rec['llm_citations'])
@@ -160,6 +208,12 @@ def layer2_query_view(rec: dict) -> dict:
         'recall': float(rec['citation_recall']),
         'correct': rec.get('answer_correct'),
         'time': float(rec['generation_time']),
+        'qid': rec['query_id'],
+        'label': rec.get('ground_truth_answer'),
+        'pred': rec.get('predicted_answer'),
+        'n_gold': len(gt),
+        'n_fab_flag': 1.0 if fabricated else 0.0,
+        'invalid_tokens': [decode_invalid(t) for t in rec['llm_citations'] if t.startswith(INVALID_PREFIX)],
     }
 
 
@@ -231,6 +285,216 @@ def api_models(root: Path, stem: str) -> Dict[str, int]:
     return counts
 
 
+# ---------------------------------------------------------------------------
+# Extra analyses (answer behaviour, recall by gold count, invalid IDs, cluster bootstrap)
+# ---------------------------------------------------------------------------
+
+def cluster_bootstrap(values: Dict[str, float], rng: np.random.Generator):
+    """Mean of per-statement values with a 95% percentile interval that resamples whole exam questions.
+
+    Statements of one question share their gold articles and are not independent, so the interval resamples
+    questions; the naive per-statement interval is returned next to it. Returns
+    (estimate, cluster CI, naive CI, number of questions)."""
+    qids = sorted(values)
+    if not qids:
+        nan = float('nan')
+        return nan, (nan, nan), (nan, nan), 0
+    questions = sorted({question_of(q) for q in qids})
+    index = {q: i for i, q in enumerate(questions)}
+    total = np.zeros(len(questions))
+    count = np.zeros(len(questions))
+    for q in qids:
+        i = index[question_of(q)]
+        total[i] += values[q]
+        count[i] += 1
+    est = float(total.sum() / count.sum())
+    pick = rng.integers(0, len(questions), size=(N_BOOTSTRAP, len(questions)))
+    cluster_means = total[pick].sum(axis=1) / np.maximum(count[pick].sum(axis=1), 1)
+    arr = np.array([values[q] for q in qids])
+    naive_means = arr[rng.integers(0, len(arr), size=(N_BOOTSTRAP, len(arr)))].mean(axis=1)
+    return (est, tuple(float(x) for x in np.percentile(cluster_means, [2.5, 97.5])),
+            tuple(float(x) for x in np.percentile(naive_means, [2.5, 97.5])), len(questions))
+
+
+def fmt_ci(ci) -> str:
+    return f'[{ci[0]:+.4f}, {ci[1]:+.4f}]'
+
+
+def answer_behaviour(views: Dict[str, dict]) -> Optional[dict]:
+    """Y/N behaviour against the majority-class baseline (always answering the more frequent gold label)."""
+    vs = [v for v in views.values() if v['label'] in ('Y', 'N')]
+    if not vs:
+        return None
+    labels = [v['label'] for v in vs]
+    majority = max(labels.count('Y'), labels.count('N')) / len(vs)
+    correct = sum(1 for v in vs if v['correct'])
+    gold_y = [v for v in vs if v['label'] == 'Y']
+    gold_n = [v for v in vs if v['label'] == 'N']
+    rec_y = float(np.mean([v['pred'] == 'Y' for v in gold_y])) if gold_y else float('nan')
+    rec_n = float(np.mean([v['pred'] == 'N' for v in gold_n])) if gold_n else float('nan')
+    return {
+        'n': len(vs), 'acc': correct / len(vs), 'majority': majority,
+        'p_vs_majority': float(binomtest(correct, len(vs), majority, alternative='greater').pvalue),
+        'says_y': float(np.mean([v['pred'] == 'Y' for v in vs])),
+        'recall_y': rec_y, 'recall_n': rec_n,
+        'balanced': float(np.nanmean([rec_y, rec_n])) if (gold_y or gold_n) else float('nan'),
+        'unparsed': sum(1 for v in vs if not v['parsed']),
+    }
+
+
+def gold_bucket(n_gold: int) -> str:
+    return '1' if n_gold <= 1 else ('2' if n_gold == 2 else '3+')
+
+
+def layer2_contrasts(V: Dict[str, Dict[str, dict]]) -> List[Tuple[str, Dict[str, float]]]:
+    """Headline contrasts as per-statement difference vectors (only those whose systems are present)."""
+    def diff(a, b, f, both_parsed=False):
+        if a not in V or b not in V:
+            return None
+        ids = [q for q in V[a] if q in V[b] and (not both_parsed or (V[a][q]['parsed'] and V[b][q]['parsed']))]
+        return {q: f(V[a][q]) - f(V[b][q]) for q in ids} or None
+
+    acc = lambda v: float(v['correct'] or 0)
+    out = []
+    for name, d in (
+        ('fabricated-ID rate: prompt-only (strict) minus RDG', diff('prompt_short', 'rdg', lambda v: v['n_fab_flag'], True)),
+        ('fabricated-ID rate: prompt-only (Lenient) minus RDG', diff('prompt_both', 'rdg', lambda v: v['n_fab_flag'], True)),
+        ('citation recall: RDG minus GPT-4o', diff('rdg', 'gpt4o_short', lambda v: v['recall'])),
+        ('citation precision: RDG minus GPT-4o', diff('rdg', 'gpt4o_short', lambda v: v['precision'])),
+        ('citation recall: RDG minus prompt-only (Lenient)', diff('rdg', 'prompt_both', lambda v: v['recall'])),
+        ('accuracy: RDG minus prompt-only', diff('rdg', 'prompt_short', acc)),
+        ('accuracy: GPT-4o minus RDG', diff('gpt4o_short', 'rdg', acc)),
+    ):
+        if d:
+            out.append((name, d))
+    ab = answer_behaviour(V['rdg']) if 'rdg' in V else None
+    if ab:
+        out.append(('accuracy: RDG minus the majority-class baseline',
+                    {q: acc(v) - ab['majority'] for q, v in V['rdg'].items() if v['label'] in ('Y', 'N')}))
+    return out
+
+
+def layer2_extra_sections(systems: Dict[str, Dict[str, dict]]) -> List[str]:
+    lines: List[str] = []
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
+    subset_views = {name: {s: {q: v for q, v in qv.items() if in_subset(q, sub)} for s, qv in systems.items()}
+                    for name, sub in SUBSETS.items()}
+
+    lines += ['## Answer behaviour against the majority-class baseline', '',
+              'Baseline: always answer the more frequent gold label of the subset. "says Y" is the share of statements '
+              'answered Y; unparsable outputs count as wrong. p: exact binomial test of accuracy above the baseline.', '',
+              '| Subset | System | n | Acc | Baseline | p (acc > baseline) | says Y | recall Y | recall N | balanced acc | #unparsable |',
+              '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
+    for name, V in subset_views.items():
+        for stem in ('rdg', 'prompt_short', 'gpt4o_short'):
+            ab = answer_behaviour(V.get(stem, {}))
+            if ab:
+                lines.append(f"| {name} | {LAYER2_SYSTEMS[stem]} | {ab['n']} | {ab['acc']:.3f} | {ab['majority']:.3f} "
+                             f"| {ab['p_vs_majority']:.2e} | {ab['says_y']:.2f} | {ab['recall_y']:.2f} | {ab['recall_n']:.2f} "
+                             f"| {ab['balanced']:.3f} | {ab['unparsed']} |")
+    lines.append('')
+
+    V = subset_views['all']
+    present = [s for s in ('rdg', 'prompt_short', 'prompt_both', 'gpt4o_short') if V.get(s)]
+    if present and 'rdg' in V:
+        lines += ['## Citation recall by number of gold articles (subset all)', '',
+                  '| Gold articles | n | ' + ' | '.join(LAYER2_SYSTEMS[s] for s in present) + ' |',
+                  '|---|---:|' + '---:|' * len(present)]
+        for bucket in ('1', '2', '3+'):
+            ids = [q for q, v in V['rdg'].items() if gold_bucket(v['n_gold']) == bucket]
+            if ids:
+                cells = [f"{np.mean([V[s][q]['recall'] for q in ids if q in V[s]]):.3f}" for s in present]
+                lines.append(f'| {bucket} | {len(ids)} | ' + ' | '.join(cells) + ' |')
+        lines.append('')
+
+    comp = {}
+    for stem in ('prompt_short', 'prompt_both'):
+        if V.get(stem):
+            c = collections_counter(invalid_kind(t) for v in V[stem].values() for t in v['invalid_tokens'])
+            comp[stem] = (c, sum(v['n_cited'] for v in V[stem].values() if v['parsed']))
+    if comp:
+        kinds = sorted({k for c, _ in comp.values() for k in c})
+        lines += ['## Invalid citation IDs of the prompt-only runs (subset all)', '',
+                  'Strict accepts only the short ID; Lenient also accepts the full form. What remains under Lenient is '
+                  'text that is not an ID of the retrieved set.', '',
+                  '| Kind | ' + ' | '.join(LAYER2_SYSTEMS[s] for s in comp) + ' |', '|---|' + '---:|' * len(comp)]
+        for k in kinds:
+            lines.append(f'| {k} | ' + ' | '.join(str(comp[s][0].get(k, 0)) for s in comp) + ' |')
+        lines.append('| total invalid / total cited | ' + ' | '.join(f'{sum(comp[s][0].values())} / {comp[s][1]}' for s in comp) + ' |')
+        lines.append('')
+
+    lines += ['## Sensitivity: cluster bootstrap over exam questions', '',
+              f'{N_BOOTSTRAP} resamples of whole exam questions; the naive interval resamples statements. Differences are '
+              'per statement (positive: the first system is higher).', '',
+              '| Subset | Contrast | n | questions | Estimate | 95% CI (questions) | 95% CI (naive) |', '|---|---|---:|---:|---:|---|---|']
+    for name in ('all', 'H18-R05', 'R06'):
+        for label, values in layer2_contrasts(subset_views[name]):
+            est, cl, nv, nq = cluster_bootstrap(values, rng)
+            lines.append(f'| {name} | {label} | {len(values)} | {nq} | {est:+.4f} | {fmt_ci(cl)} | {fmt_ci(nv)} |')
+    lines.append('')
+    return lines
+
+
+def collections_counter(items):
+    counts: Dict[str, int] = {}
+    for it in items:
+        counts[it] = counts.get(it, 0) + 1
+    return counts
+
+
+def l1_standard(retrieved: List[str], gold: List[str], k: int) -> Dict[str, float]:
+    """Retrieval metrics under the standard definitions, on the first k distinct articles returned.
+
+    P@k = hits / k (the stored precision divides by the number of distinct articles returned, which rewards a
+    system for returning fewer); NDCG's ideal ranking holds min(|gold|, k) articles."""
+    gold_set = set(gold)
+    top = list(dict.fromkeys(retrieved))[:k]
+    hits = [d in gold_set for d in top]
+    dcg = sum(1 / math.log2(i + 2) for i, h in enumerate(hits) if h)
+    idcg = sum(1 / math.log2(i + 2) for i in range(min(len(gold_set), k)))
+    return {'p': sum(hits) / k, 'r': sum(hits) / len(gold_set) if gold_set else 0.0,
+            'mrr': next((1 / (i + 1) for i, h in enumerate(hits) if h), 0.0), 'ndcg': dcg / idcg if idcg else 0.0}
+
+
+def layer1_extra_sections(data: Dict[Tuple[str, int], Dict[str, dict]], systems: List[str], some: Dict[str, dict]) -> List[str]:
+    lines: List[str] = []
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
+    std = {key: {q: l1_standard(r['retrieved'], r['ground_truth'], key[1]) for q, r in recs.items() if r['ground_truth']}
+           for key, recs in data.items()}
+    lines += ['## Standard definitions (P@k = hits / k, first k distinct articles, ideal DCG over min(|gold|, k))', '',
+              'The tables above divide precision by the number of distinct articles a system returned, so a system that '
+              'returns fewer articles (several chunks of one article collapse into one) scores higher. "returned" is the '
+              'mean number of distinct articles.', '',
+              '| Subset | System | k | returned | P@k | R@k | MRR | NDCG@k |', '|---|---|---:|---:|---:|---:|---:|---:|']
+    for name, sub in SUBSETS.items():
+        qids = sorted(q for q in some if some[q]['ground_truth'] and in_subset(q, sub))
+        if not qids:
+            continue
+        for stem in systems:
+            for k in K_VALUES:
+                if (stem, k) not in data:
+                    continue
+                m = std[(stem, k)]
+                ret = np.mean([len(set(data[(stem, k)][q]['retrieved'])) for q in qids])
+                lines.append(f"| {name} | {LAYER1_SYSTEMS[stem]} | {k} | {ret:.2f} | "
+                             + ' | '.join(f"{np.mean([m[q][key] for q in qids]):.4f}" for key in ('p', 'r', 'mrr', 'ndcg')) + ' |')
+    lines.append('')
+    lines += ['## Sensitivity: cluster bootstrap over exam questions (standard definitions, subset all)', '',
+              f'{N_BOOTSTRAP} resamples of whole exam questions; the naive interval resamples statements.', '',
+              '| k | Contrast | Metric | questions | Estimate | 95% CI (questions) | 95% CI (naive) |', '|---:|---|---|---:|---:|---|---|']
+    qids = sorted(q for q in some if some[q]['ground_truth'])
+    for k in K_VALUES:
+        for other in ('flat_chunksize300', 'flat_chunksize512'):
+            if ('sphr', k) not in data or (other, k) not in data or not qids:
+                continue
+            for key, label in (('p', 'P@k (hits / k)'), ('r', 'R@k'), ('mrr', 'MRR'), ('ndcg', 'NDCG@k')):
+                values = {q: std[('sphr', k)][q][key] - std[(other, k)][q][key] for q in qids}
+                est, cl, nv, nq = cluster_bootstrap(values, rng)
+                lines.append(f'| {k} | SPHR minus {LAYER1_SYSTEMS[other]} | {label} | {nq} | {est:+.4f} | {fmt_ci(cl)} | {fmt_ci(nv)} |')
+    lines.append('')
+    return lines
+
+
 def run_layer2(root: Path, compare: Optional[Path]) -> str:
     rng = np.random.default_rng(BOOTSTRAP_SEED)
     systems: Dict[str, Dict[str, dict]] = {}
@@ -289,6 +553,7 @@ def run_layer2(root: Path, compare: Optional[Path]) -> str:
                              f"| {p_bonf:.3e} | {marker_for(p_bonf)} |")
             lines.append('')
 
+    lines += layer2_extra_sections(systems)
     if compare is not None:
         lines += compare_layer2(root, systems, compare)
     return '\n'.join(lines)
@@ -386,6 +651,7 @@ def run_layer1(root: Path) -> str:
                                      f'| {a.mean():.4f} | {b.mean():.4f} | {a.mean() - b.mean():+.4f} '
                                      f'| {t:+.3f} | {p_bonf:.3e} | {marker_for(p_bonf)} |')
             lines.append('')
+    lines += layer1_extra_sections(data, systems, some)
     return '\n'.join(lines)
 
 
