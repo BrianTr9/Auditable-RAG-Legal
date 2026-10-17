@@ -33,8 +33,8 @@ Extra report sections (after the per-subset tables, so the per-subset layout is 
     Layer 2: answer behaviour against the majority-class baseline (per-class recall, balanced accuracy), citation
              recall by number of gold articles, composition of the invalid IDs of the prompt-only runs, and a
              cluster bootstrap over exam questions for the headline contrasts.
-    Layer 1: precision and NDCG under the standard definitions (P@k = hits / k, ideal DCG over min(|gold|, k)) and a
-             cluster bootstrap of SPHR minus each flat baseline.
+    Layer 1: precision and NDCG per retrieval slot (P@k = hits / k, ideal DCG over min(|gold|, k)) next to the
+             per-distinct-article numbers of the main tables, and a cluster bootstrap of SPHR minus each flat baseline.
 The 1216 statements come from 407 exam questions (up to five statements share one question and its gold articles),
 so the bootstrap resamples whole questions; the naive per-statement interval is printed next to it.
 
@@ -443,10 +443,13 @@ def collections_counter(items):
 
 
 def l1_standard(retrieved: List[str], gold: List[str], k: int) -> Dict[str, float]:
-    """Retrieval metrics under the standard definitions, on the first k distinct articles returned.
+    """Slot-based retrieval metrics on the first k distinct articles returned.
 
-    P@k = hits / k (the stored precision divides by the number of distinct articles returned, which rewards a
-    system for returning fewer); NDCG's ideal ranking holds min(|gold|, k) articles."""
+    P@k = hits / k: every one of the k retrieval slots counts, so a second chunk of an already returned article
+    uses a slot without adding a hit. The stored precision instead divides by the number of distinct articles
+    returned, which measures how clean the set of provisions is and does not charge for duplicate chunks of a
+    relevant article. Both are legitimate and answer different questions; NDCG's ideal ranking here holds
+    min(|gold|, k) articles."""
     gold_set = set(gold)
     top = list(dict.fromkeys(retrieved))[:k]
     hits = [d in gold_set for d in top]
@@ -461,10 +464,11 @@ def layer1_extra_sections(data: Dict[Tuple[str, int], Dict[str, dict]], systems:
     rng = np.random.default_rng(BOOTSTRAP_SEED)
     std = {key: {q: l1_standard(r['retrieved'], r['ground_truth'], key[1]) for q, r in recs.items() if r['ground_truth']}
            for key, recs in data.items()}
-    lines += ['## Standard definitions (P@k = hits / k, first k distinct articles, ideal DCG over min(|gold|, k))', '',
-              'The tables above divide precision by the number of distinct articles a system returned, so a system that '
-              'returns fewer articles (several chunks of one article collapse into one) scores higher. "returned" is the '
-              'mean number of distinct articles.', '',
+    lines += ['## Slot-based definitions (P@k = hits / k, first k distinct articles, ideal DCG over min(|gold|, k))', '',
+              'The tables above divide precision by the number of distinct articles a system returned: several chunks of one '
+              'relevant article count once, so this measures how clean the set of provisions shown to the generator is. '
+              'The definition below divides by the k retrieval slots, so a duplicate chunk uses a slot without adding a hit. '
+              'Neither is wrong; they differ on precision only. "returned" is the mean number of distinct articles.', '',
               '| Subset | System | k | returned | P@k | R@k | MRR | NDCG@k |', '|---|---|---:|---:|---:|---:|---:|---:|']
     for name, sub in SUBSETS.items():
         qids = sorted(q for q in some if some[q]['ground_truth'] and in_subset(q, sub))
@@ -479,7 +483,7 @@ def layer1_extra_sections(data: Dict[Tuple[str, int], Dict[str, dict]], systems:
                 lines.append(f"| {name} | {LAYER1_SYSTEMS[stem]} | {k} | {ret:.2f} | "
                              + ' | '.join(f"{np.mean([m[q][key] for q in qids]):.4f}" for key in ('p', 'r', 'mrr', 'ndcg')) + ' |')
     lines.append('')
-    lines += ['## Sensitivity: cluster bootstrap over exam questions (standard definitions, subset all)', '',
+    lines += ['## Sensitivity: cluster bootstrap over exam questions (slot-based definitions, subset all)', '',
               f'{N_BOOTSTRAP} resamples of whole exam questions; the naive interval resamples statements.', '',
               '| k | Contrast | Metric | questions | Estimate | 95% CI (questions) | 95% CI (naive) |', '|---:|---|---|---:|---:|---|---|']
     qids = sorted(q for q in some if some[q]['ground_truth'])
